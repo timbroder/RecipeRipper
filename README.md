@@ -58,6 +58,16 @@ Example:
 python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup
 ```
 
+## Running tests
+The project uses `pytest` for its unit and integration tests.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pytest
+```
+
 
 ## Offline prep (optional)
 To cache all models ahead of time (useful for travel/air-gapped machines), run:
