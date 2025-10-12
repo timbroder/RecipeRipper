@@ -106,8 +106,10 @@ def get_youtube_video_id(url: str) -> Optional[str]:
             return m.group(1)
     return None
 
-def download_youtube(url: str, tmpdir: Path, cache_dir: Path = Path(".cache")) -> Tuple[Optional[Path], dict]:
-    """Download YouTube video, using cache if available."""
+def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
+    """Download YouTube video, using cache if available. Cache is always local to the project directory."""
+    script_dir = Path(__file__).parent.resolve()
+    cache_dir = script_dir / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     vid_id = get_youtube_video_id(url)
     cached_video = None
