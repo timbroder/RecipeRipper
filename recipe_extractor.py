@@ -148,7 +148,8 @@ def download_youtube(url: str, tmpdir: Path, cache_dir: Path = Path(".cache")) -
             return None, {}
         vid = None
         if "requested_downloads" in info and info["requested_downloads"]:
-            vidpath = info["requested_downloads"][0].get("filepath")
+            entry = info["requested_downloads"][0]
+            vidpath = entry.get("filepath") or entry.get("filename")
             if vidpath:
                 vid = Path(vidpath)
         else:

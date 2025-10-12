@@ -1,5 +1,5 @@
-yt-dlp==2025.1.12
-faster-whisper==1.0.3
+yt-dlp
+faster-whisper
 paddleocr==2.8.1
 opencv-python==4.10.0.84
 numpy==1.26.4
