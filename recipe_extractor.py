@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
 from rich import box
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
@@ -509,16 +510,16 @@ def pretty_print(out: RecipeOutput):
     table.add_column("Section", style="bold cyan", no_wrap=True)
     table.add_column("Content", style="")
     if out.ingredients:
-        ing_txt = "\\n".join([f"- {i.quantity + ' ' if i.quantity else ''}{(i.unit + ' ') if i.unit else ''}{i.item or i.original}" for i in out.ingredients[:20]])
+        ing_txt = "\n".join([f"- {i.quantity + ' ' if i.quantity else ''}{(i.unit + ' ') if i.unit else ''}{i.item or i.original}" for i in out.ingredients[:20]])
         if len(out.ingredients) > 20:
-            ing_txt += f"\\n… (+{len(out.ingredients)-20} more)"
+            ing_txt += f"\n… (+{len(out.ingredients)-20} more)"
     else:
         ing_txt = "None"
     table.add_row("Ingredients", ing_txt)
     if out.directions:
-        dir_txt = "\\n".join([f\"{i+1}. {s}\" for i, s in enumerate(out.directions[:12])])
+        dir_txt = "\n".join([f"{i+1}. {s}" for i, s in enumerate(out.directions[:12])])
         if len(out.directions) > 12:
-            dir_txt += f"\\n… (+{len(out.directions)-12} more)"
+            dir_txt += f"\n… (+{len(out.directions)-12} more)"
     else:
         dir_txt = "None"
     table.add_row("Directions", dir_txt)
@@ -531,24 +532,28 @@ def preload_models(model_size: str="small", lang: str="en"):
     subsequent runs work fully offline.
     """
     console.print(f"[green]Preloading faster-whisper '{model_size}' and PaddleOCR ('{lang}') models…")
-    # 1) faster-whisper -> download on init
-    try:
-        from faster_whisper import WhisperModel
-        _ = WhisperModel(model_size, device="cpu", compute_type="int8")
-        console.print("[green]✓ faster-whisper cached")
-    except Exception as e:
-        console.print(f"[red]faster-whisper preload failed: {e}")
-    # 2) PaddleOCR -> download on first construct + first call
-    try:
-        from paddleocr import PaddleOCR
-        import numpy as _np
-        ocr = PaddleOCR(use_angle_cls=True, lang=lang)
-        dummy = (_np.zeros((64, 64, 3)) * 255).astype("uint8")
-        _ = ocr.ocr(dummy, cls=True)
-        console.print("[green]✓ PaddleOCR cached")
-    except Exception as e:
-        console.print(f"[red]PaddleOCR preload failed: {e}")
-
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
+        fw_task = progress.add_task("Downloading faster-whisper model…", start=True)
+        try:
+            from faster_whisper import WhisperModel
+            _ = WhisperModel(model_size, device="cpu", compute_type="int8")
+            progress.update(fw_task, description="✓ faster-whisper cached")
+            progress.stop_task(fw_task)
+        except Exception as e:
+            progress.stop_task(fw_task)
+            console.print(f"[red]faster-whisper preload failed: {e}")
+        ocr_task = progress.add_task("Downloading PaddleOCR model…", start=True)
+        try:
+            from paddleocr import PaddleOCR
+            import numpy as _np
+            ocr = PaddleOCR(use_angle_cls=True, lang=lang)
+            dummy = (_np.zeros((64, 64, 3)) * 255).astype("uint8")
+            _ = ocr.ocr(dummy, cls=True)
+            progress.update(ocr_task, description="✓ PaddleOCR cached")
+            progress.stop_task(ocr_task)
+        except Exception as e:
+            progress.stop_task(ocr_task)
+            console.print(f"[red]PaddleOCR preload failed: {e}")
 
 
 def list_models():
