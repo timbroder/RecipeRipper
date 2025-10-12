@@ -68,6 +68,10 @@ pip install -r requirements.txt
 pytest
 ```
 
+### Continuous integration
+
+GitHub Actions automatically runs the test suite for every pull request and for pushes to the `main` branch via the `Tests` workflow in `.github/workflows/tests.yml`. Mark the "Tests" status check as required in your branch protection rules to prevent merges when the suite fails.
+
 
 ## Offline prep (optional)
 To cache all models ahead of time (useful for travel/air-gapped machines), run:
