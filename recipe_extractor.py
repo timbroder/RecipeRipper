@@ -93,7 +93,40 @@ def ensure_ffmpeg():
 # -----------------------------
 # YouTube download / metadata
 # -----------------------------
-def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
+def get_youtube_video_id(url: str) -> Optional[str]:
+    """Extract the YouTube video ID from a URL."""
+    import re
+    patterns = [
+        r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})",
+        r"youtube\.com/watch\?.*?v=([\w-]{11})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, url)
+        if m:
+            return m.group(1)
+    return None
+
+def download_youtube(url: str, tmpdir: Path, cache_dir: Path = Path(".cache")) -> Tuple[Optional[Path], dict]:
+    """Download YouTube video, using cache if available."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    vid_id = get_youtube_video_id(url)
+    cached_video = None
+    cached_info = None
+    if vid_id:
+        for ext in ["mp4", "mkv", "webm"]:
+            candidate = cache_dir / f"{vid_id}.{ext}"
+            if candidate.exists():
+                cached_video = candidate
+                info_path = cache_dir / f"{vid_id}.info.json"
+                if info_path.exists():
+                    try:
+                        cached_info = json.loads(info_path.read_text())
+                    except Exception:
+                        cached_info = None
+                break
+    if cached_video:
+        return cached_video, cached_info or {}
+    # Not cached, download
     from yt_dlp import YoutubeDL
     ytdlp_out = tmpdir / "%(id)s.%(ext)s"
     info_json: dict = {}
@@ -122,6 +155,19 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
             mp4s = list(tmpdir.glob("*.mp4"))
             if mp4s:
                 vid = mp4s[0]
+        # Save to cache
+        if vid and vid_id:
+            cache_path = cache_dir / f"{vid_id}{vid.suffix}"
+            shutil.copy2(vid, cache_path)
+            for p in tmpdir.glob("*.info.json"):
+                try:
+                    info_json = json.loads(p.read_text())
+                    (cache_dir / f"{vid_id}.info.json").write_text(p.read_text())
+                    break
+                except Exception:
+                    pass
+            return cache_path, info_json or {}
+        # fallback
         for p in tmpdir.glob("*.info.json"):
             try:
                 info_json = json.loads(p.read_text())
