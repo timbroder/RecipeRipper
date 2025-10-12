@@ -1,0 +1,8 @@
+yt-dlp==2025.1.12
+faster-whisper==1.0.3
+paddleocr==2.8.1
+opencv-python==4.10.0.84
+numpy==1.26.4
+pydantic==2.8.2
+rich==13.7.1
+tqdm==4.66.5
