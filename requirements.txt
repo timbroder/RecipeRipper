@@ -6,3 +6,5 @@ numpy==1.26.4
 pydantic==2.8.2
 rich==13.7.1
 tqdm==4.66.5
+pytest==8.3.2
+pytest-cov==5.0.0

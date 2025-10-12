@@ -1,5 +1,7 @@
 # Recipe Video Extractor (YouTube or Local File)
 
+[![Tests](https://github.com/RecipeRipper/RecipeRipper/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/RecipeRipper/RecipeRipper/actions/workflows/tests.yml)
+
 Extract structured **ingredients** and **directions** from a recipe video — works with a **YouTube URL** (incl. Shorts) or a **local file**.
 
 ## What it does
@@ -57,6 +59,20 @@ Example:
 ```bash
 python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup
 ```
+
+## Running tests
+The project uses `pytest` for its unit and integration tests.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pytest
+```
+
+### Continuous integration
+
+GitHub Actions automatically runs the test suite for every pull request and for pushes to the `main` branch via the `Tests` workflow in `.github/workflows/tests.yml`. Mark the "Tests" status check as required in your branch protection rules to prevent merges when the suite fails.
 
 
 ## Offline prep (optional)
