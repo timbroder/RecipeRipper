@@ -25,16 +25,20 @@ If you prefer to build locally (for example, to match a specific CUDA/toolchain)
    cd Paddle
    git checkout release/2.6
    ```
-2. Install the Python build requirements:
+2. Install Python build helpers (these are missing in some minimal Python installs and are required for `bdist_wheel`):
+   ```bash
+   python -m pip install --upgrade pip setuptools wheel
+   ```
+3. Install the Python build requirements:
    ```bash
    pip install -r python/requirements.txt
    ```
-3. Build the wheel (CPU example):
+4. Build the wheel (CPU example):
    ```bash
    python setup.py bdist_wheel
    ```
    The wheel is written to `./dist/`.
-4. Install the freshly built wheel and PaddleOCR:
+5. Install the freshly built wheel and PaddleOCR:
    ```bash
    pip install dist/paddlepaddle-*-cp314-*.whl
    pip install paddleocr==2.8.1 --no-deps
