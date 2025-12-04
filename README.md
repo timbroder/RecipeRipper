@@ -16,6 +16,8 @@ Extract structured **ingredients** and **directions** from a recipe video — wo
 
 ## Install (macOS/Linux)
 > You need Python 3.10+ and `ffmpeg`.
+>
+> **Python 3.14 note:** PaddlePaddle does not yet publish official Python 3.14 wheels. Install the rest of the dependencies normally, then follow [docs/python-3.14.md](docs/python-3.14.md) to add a custom PaddlePaddle wheel (as described in [Paddle issue #71616](https://github.com/PaddlePaddle/Paddle/issues/71616)).
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
