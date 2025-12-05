@@ -8,11 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -45,11 +44,14 @@ class RecipeOutput(BaseModel):
 # -----------------------------
 
 TIMEOUT = 60 * 60  # 1 hour
-YTDLP_OPTS = [
-    "--no-warnings",
-    "--no-call-home",
-    "--ignore-errors",
-]
+
+# OCR processing constants
+OCR_SCALE_THRESHOLD = 720
+OCR_UPSCALE_FACTOR = 1.25
+QTY_PRECISION = 3
+OCR_SAMPLE_LIMIT = 50
+DESC_TRUNCATE_LIMIT = 5000
+TRANSCRIPT_TRUNCATE_LIMIT = 10000
 
 UNITS = [
     "teaspoon","tsp","tablespoon","tbsp","cup","cups","ounce","ounces","oz",
@@ -57,25 +59,25 @@ UNITS = [
     "liter","liters","l","milliliter","milliliters","ml","pinch","dash","clove","cloves",
     "slice","slices","can","cans","package","packages","stick","sticks"
 ]
-UNITS_PATTERN = r"(?:%s)\\.?" % "|".join([re.escape(u) for u in sorted(UNITS, key=len, reverse=True)])
+UNITS_PATTERN = r"(?:%s)\.?" % "|".join([re.escape(u) for u in sorted(UNITS, key=len, reverse=True)])
 
-FRACT = r"(?:\\d+\\s*\\d?\\/\\d+|\\d+\\/\\d+|\\d+\\.\\d+|\\d+)"
-QTY_PATTERN = rf"^\\s*(?P<qty>{FRACT})(\\s*(?P<unit>{UNITS_PATTERN}))?\\b"
-BULLET_PATTERN = r"^\\s*[-•*]\\s*"
+FRACT = r"(?:\d+\s*\d?/\d+|\d+/\d+|\d+\.\d+|\d+)"
+QTY_PATTERN = rf"^\s*(?P<qty>{FRACT})(\s*(?P<unit>{UNITS_PATTERN}))?\b"
+BULLET_PATTERN = r"^\s*[-•*]\s*"
 
 IMPERATIVE_VERBS = [
     "add","bake","blend","boil","braise","break","bring","broil","brown","brush","chill","chop",
     "combine","cook","cool","crack","cream","cube","cut","deglaze","dice","divide","drain","drizzle",
     "fry","fold","garnish","grate","grill","heat","knead","marinate","mash","measure","microwave",
-    "mix","knead","pan-fry","pepper","pour","preheat","press","reduce","rest","roast","salt",
+    "mix","pan-fry","pepper","pour","preheat","press","reduce","rest","roast","salt",
     "saute","sauté","score","season","sear","serve","shred","simmer","slice","soak","spoon",
     "spread","sprinkle","stir","stir-fry","strain","temper","tenderize","test","thaw",
     "toast","turn","whisk"
 ]
-IMPERATIVE_RE = re.compile(rf'^\\s*(?:\\d+[\\).\\s-]+)?\\s*(?:{"|".join(IMPERATIVE_VERBS)})\\b', re.I)
+IMPERATIVE_RE = re.compile(rf'^\s*(?:\d+[)\.\s-]+)?\s*(?:{"|".join(IMPERATIVE_VERBS)})\b', re.I)
 
-TEMP_RE = re.compile(r"\\b(\\d{2,3})\\s*[°º]?\\s*(F|C)\\b", re.I)
-TIME_RE = re.compile(r"\\b(\\d+)\\s*(seconds?|mins?|minutes?|hrs?|hours?)\\b", re.I)
+TEMP_RE = re.compile(r"\b(\d{2,3})\s*[°º]?\s*(F|C)\b", re.I)
+TIME_RE = re.compile(r"\b(\d+)\s*(seconds?|mins?|minutes?|hrs?|hours?)\b", re.I)
 
 def run(cmd: List[str], cwd: Optional[str]=None, timeout: int=TIMEOUT) -> subprocess.CompletedProcess:
     console.log(f"[cyan]$ {' '.join(cmd)}")
@@ -86,7 +88,7 @@ def ensure_ffmpeg():
         cp = run(["ffmpeg","-version"], timeout=10)
         if cp.returncode != 0:
             raise RuntimeError("ffmpeg missing")
-    except Exception:
+    except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired):
         console.print("[red]ffmpeg is required. Install via brew/apt/etc.")
         sys.exit(1)
 
@@ -95,7 +97,6 @@ def ensure_ffmpeg():
 # -----------------------------
 def get_youtube_video_id(url: str) -> Optional[str]:
     """Extract the YouTube video ID from a URL."""
-    import re
     patterns = [
         r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})",
         r"youtube\.com/watch\?.*?v=([\w-]{11})",
@@ -123,7 +124,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
                 if info_path.exists():
                     try:
                         cached_info = json.loads(info_path.read_text())
-                    except Exception:
+                    except (json.JSONDecodeError, OSError):
                         cached_info = None
                 break
     if cached_video:
@@ -167,7 +168,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
                     info_json = json.loads(p.read_text())
                     (cache_dir / f"{vid_id}.info.json").write_text(p.read_text())
                     break
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     pass
             return cache_path, info_json or {}
         # fallback
@@ -175,7 +176,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
             try:
                 info_json = json.loads(p.read_text())
                 break
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
         return vid, info_json or {}
 
@@ -202,7 +203,6 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
     if not cap.isOpened():
         return []
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     step = max(1, int(seconds_between * fps))
     ocr = PaddleOCR(use_angle_cls=True, lang="en")
     idx = 0
@@ -216,12 +216,11 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
             ok, frame = cap.retrieve()
             if not ok:
                 break
-            import cv2 as _cv2
-            gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             h, w = gray.shape
-            scale = 1.25 if max(h, w) < 720 else 1.0
+            scale = OCR_UPSCALE_FACTOR if max(h, w) < OCR_SCALE_THRESHOLD else 1.0
             if scale != 1.0:
-                gray = _cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=_cv2.INTER_CUBIC)
+                gray = cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
             res = ocr.ocr(gray, cls=True)
             if res and res[0]:
                 for line in res[0]:
@@ -272,11 +271,10 @@ def parse_ingredient(line: str) -> Ingredient:
     item = rest
     notes = None
     if "(" in rest and ")" in rest:
-        try:
-            notes = re.search(r"\\((.*?)\\)", rest).group(1)
-            item = re.sub(r"\\(.*?\\)", "", rest).strip(",; ")
-        except Exception:
-            pass
+        match = re.search(r"\((.*?)\)", rest)
+        if match:
+            notes = match.group(1)
+            item = re.sub(r"\(.*?\)", "", rest).strip(",; ")
     return Ingredient(original=line.strip(), quantity=qty, unit=unit, item=item or None, notes=notes)
 
 def looks_like_direction(line: str) -> bool:
@@ -287,12 +285,12 @@ def looks_like_direction(line: str) -> bool:
         return True
     if TEMP_RE.search(ls) or TIME_RE.search(ls):
         return True
-    if re.match(r"^\\s*\\d+[\\).\\s-]+", ls):
+    if re.match(r"^\s*\d+[)\.\s-]+", ls):
         return True
-    if re.search(r"\\bstep\\s*\\d+\\b", ls, flags=re.I):
+    if re.search(r"\bstep\s*\d+\b", ls, flags=re.I):
         return True
     verbs = ["cook","bake","simmer","saute","sauté","grill","roast","mix","stir","whisk","boil","fry","blend","fold"]
-    if any(re.search(rf"\\b{v}\\b", ls, flags=re.I) for v in verbs):
+    if any(re.search(rf"\b{v}\b", ls, flags=re.I) for v in verbs):
         return True
     return False
 
@@ -310,8 +308,8 @@ def split_lines_to_sections(lines: List[str]) -> Tuple[List[str], List[str], Lis
 def combine_sources(description: str, transcript: str, ocr_lines: List[str]) -> Tuple[List[str], List[str]]:
     text_candidates: List[str] = []
     for blob in [description or "", transcript or ""]:
-        for raw in re.split(r"[\\n\\r]+", blob):
-            parts = re.split(r"(?<=[\\.\\!\\?])\\s+", raw)
+        for raw in re.split(r"[\n\r]+", blob):
+            parts = re.split(r"(?<=[\.!?])\s+", raw)
             for p in parts:
                 p = p.strip()
                 if p:
@@ -330,7 +328,7 @@ def combine_sources(description: str, transcript: str, ocr_lines: List[str]) -> 
             if looks_like_ingredient(ln):
                 ing_lines.append(ln)
     if not dir_lines and transcript:
-        sentences = re.split(r"(?<=[\\.\\!\\?])\\s+", transcript)
+        sentences = re.split(r"(?<=[\.!?])\s+", transcript)
         for s in sentences:
             if looks_like_direction(s):
                 dir_lines.append(s.strip())
@@ -339,8 +337,6 @@ def combine_sources(description: str, transcript: str, ocr_lines: List[str]) -> 
 # -----------------------------
 # Cleanup / Normalization (deterministic, no external APIs)
 # -----------------------------
-
-from fractions import Fraction
 
 UNIT_ALIASES = {
     "teaspoon": "tsp", "teaspoons": "tsp", "tsp.": "tsp", "tsp": "tsp",
@@ -400,8 +396,8 @@ def clean_ingredients(ings):
         qty = ing.quantity
         unit = _canon_unit(ing.unit)
         item = (ing.item or ing.original).strip()
-        item = re.sub(r"^\\s*[-•*]\\s*", "", item)
-        item = re.sub(r"\\s+", " ", item).strip(",;: ")
+        item = re.sub(r"^\s*[-•*]\s*", "", item)
+        item = re.sub(r"\s+", " ", item).strip(",;: ")
         norm.append(Ingredient(
             original=ing.original,
             quantity=_normalize_unicode_fracs(qty) if qty else None,
@@ -429,7 +425,7 @@ def clean_ingredients(ings):
                 break
             total += f
         if all_numeric and items[0].unit:
-            q_out = str(round(total, 3)).rstrip("0").rstrip(".")
+            q_out = str(round(total, QTY_PRECISION)).rstrip("0").rstrip(".")
             merged.append(Ingredient(
                 original=items[0].original,
                 quantity=q_out,
@@ -447,8 +443,8 @@ def _sentence_case(s: str) -> str:
     s = s.strip()
     if not s:
         return s
-    s = re.sub(r"[\\U00010000-\\U0010ffff]", "", s)
-    s = re.sub(r"\\s+", " ", s)
+    s = re.sub(r"[\U00010000-\U0010ffff]", "", s)
+    s = re.sub(r"\s+", " ", s)
     return s[0].upper() + s[1:] if s else s
 
 def clean_directions(steps):
@@ -458,13 +454,13 @@ def clean_directions(steps):
         s = raw.strip()
         if not s:
             continue
-        s = re.sub(r"\\(?\\b\\d{0,2}:\\d{2}\\b\\)?", "", s)
-        s = re.sub(r"\\[\\s*\\d+:\\d{2}\\s*\\]", "", s)
-        s = re.sub(r"^\\s*(?:[-•*]|\\d+[\\).\\s-]+)\\s*", "", s)
-        s = re.sub(r"\\bmins?\\b", "minutes", s, flags=re.I)
-        s = re.sub(r"\\bhrs?\\b", "hours", s, flags=re.I)
-        s = re.sub(r"\\bdeg(?:rees)?\\s*F\\b", "°F", s, flags=re.I)
-        s = re.sub(r"\\bdeg(?:rees)?\\s* C\\b", "°C", s, flags=re.I)
+        s = re.sub(r"\(?\b\d{0,2}:\d{2}\b\)?", "", s)
+        s = re.sub(r"\[\s*\d+:\d{2}\s*\]", "", s)
+        s = re.sub(r"^\s*(?:[-•*]|\d+[)\.\s-]+)\s*", "", s)
+        s = re.sub(r"\bmins?\b", "minutes", s, flags=re.I)
+        s = re.sub(r"\bhrs?\b", "hours", s, flags=re.I)
+        s = re.sub(r"\bdeg(?:rees)?\s*F\b", "°F", s, flags=re.I)
+        s = re.sub(r"\bdeg(?:rees)?\s*C\b", "°C", s, flags=re.I)
         s = _sentence_case(s)
         key = s.lower()
         if key in seen:
@@ -482,6 +478,12 @@ def clean_directions(steps):
 # -----------------------------
 # Main pipeline
 # -----------------------------
+
+def _process_directions(dir_lines: List[str], cleanup: bool) -> List[str]:
+    """Process direction lines with optional cleanup."""
+    stripped = [d.strip() for d in dir_lines if d.strip()]
+    return clean_directions(stripped) if cleanup else stripped
+
 
 def process_youtube(url: str, args) -> RecipeOutput:
     with tempfile.TemporaryDirectory() as td:
@@ -502,9 +504,9 @@ def process_youtube(url: str, args) -> RecipeOutput:
             title=title,
             url=url,
             ingredients=ingredients,
-            directions=clean_directions([d.strip() for d in dir_lines if d.strip()]) if args.cleanup else [d.strip() for d in dir_lines if d.strip()],
-            extras={"ocr_samples": ocr_lines[:50]},
-            raw_sources={"description": description[:5000], "transcript": transcript[:10000]},
+            directions=_process_directions(dir_lines, args.cleanup),
+            extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
+            raw_sources={"description": description[:DESC_TRUNCATE_LIMIT], "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
         )
         return out
 
@@ -524,9 +526,9 @@ def process_local(video_file: str, args) -> RecipeOutput:
         title=title,
         url=None,
         ingredients=ingredients,
-        directions=clean_directions([d.strip() for d in dir_lines if d.strip()]) if args.cleanup else [d.strip() for d in dir_lines if d.strip()],
-        extras={"ocr_samples": ocr_lines[:50]},
-        raw_sources={"description": "", "transcript": transcript[:10000]},
+        directions=_process_directions(dir_lines, args.cleanup),
+        extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
+        raw_sources={"description": "", "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
     )
     return out
 
@@ -552,7 +554,7 @@ def save_outputs(out: RecipeOutput, outdir: Path):
             md.append(f"{i}. {step}")
     else:
         md.append("_None detected_")
-    (outdir / "recipe.md").write_text("\\n".join(md))
+    (outdir / "recipe.md").write_text("\n".join(md))
 
 def pretty_print(out: RecipeOutput):
     table = Table(title="Extracted Recipe", box=box.SIMPLE, show_lines=False)
