@@ -134,7 +134,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
     info_json: dict = {}
     ydl_opts = {
         "outtmpl": str(ytdlp_out),
-        "format": "mp4[height<=1080]/mp4/best",
+        "format": "best",
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "en.*", "en-US"],
@@ -182,9 +182,9 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
 # -----------------------------
 # Transcription (faster-whisper)
 # -----------------------------
-def transcribe(video_path: Path, model_size: str="small", language: Optional[str]=None) -> str:
+def transcribe(video_path: Path, model_size: str="large-v3", language: Optional[str]=None) -> str:
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = WhisperModel(model_size, device="cpu", compute_type="float16")
     segments, info = model.transcribe(str(video_path), beam_size=5, language=language)
     text_parts = []
     for seg in segments:
@@ -575,7 +575,7 @@ def pretty_print(out: RecipeOutput):
     console.print(table)
 
 
-def preload_models(model_size: str="small", lang: str="en"):
+def preload_models(model_size: str="large-v3", lang: str="en"):
     """
     Pre-download / cache ASR (faster-whisper) and OCR (PaddleOCR) models so
     subsequent runs work fully offline.
@@ -585,7 +585,7 @@ def preload_models(model_size: str="small", lang: str="en"):
         fw_task = progress.add_task("Downloading faster-whisper model…", start=True)
         try:
             from faster_whisper import WhisperModel
-            _ = WhisperModel(model_size, device="cpu", compute_type="int8")
+            _ = WhisperModel(model_size, device="cpu", compute_type="float16")
             progress.update(fw_task, description="✓ faster-whisper cached")
             progress.stop_task(fw_task)
         except Exception as e:
@@ -620,9 +620,9 @@ def list_models():
     rows = [
         ("tiny",   "~75 MB",   "~0.5–1 GB", "Fastest, lower accuracy; good for quick drafts"),
         ("base",   "~145 MB",  "~1–2 GB",   "Balanced speed/accuracy for Shorts"),
-        ("small",  "~460 MB",  "~2–3 GB",   "Recommended default"),
+        ("small",  "~460 MB",  "~2–3 GB",   "Good balance of speed and accuracy"),
         ("medium","~1.5 GB",   "~4–6 GB",   "Better accuracy; slower"),
-        ("large-v3","~3.1 GB","~8–12 GB",   "Best accuracy; slowest on CPU"),
+        ("large-v3","~3.1 GB","~8–12 GB",   "Best accuracy; recommended default"),
     ]
     for r in rows:
         t.add_row(*r)
@@ -635,7 +635,7 @@ def main():
     g.add_argument("--youtube", help="YouTube URL (works with Shorts)")
     g.add_argument("--video", help="Path to a local video file")
     parser.add_argument("--language", help="Language hint (e.g., en, es, fr). Auto-detect if omitted.")
-    parser.add_argument("--model", default="small", help="faster-whisper model size: tiny/base/small/medium/large-v3")
+    parser.add_argument("--model", default="large-v3", help="faster-whisper model size: tiny/base/small/medium/large-v3")
     parser.add_argument("--fps-sample", type=float, default=0.6, help="Seconds between OCR frames (default 0.6s)")
     parser.add_argument("--max-frames", type=int, default=180, help="Max frames to OCR (default 180)")
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")
