@@ -95,6 +95,8 @@ def ensure_ffmpeg():
 # -----------------------------
 def get_youtube_video_id(url: str) -> Optional[str]:
     """Extract the YouTube video ID from a URL."""
+    if not url:
+        return None
     import re
     patterns = [
         r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})",
@@ -134,7 +136,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
     info_json: dict = {}
     ydl_opts = {
         "outtmpl": str(ytdlp_out),
-        "format": "best",
+        "format": "mp4[height<=1080]/mp4/best",
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "en.*", "en-US"],
@@ -184,7 +186,7 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
 # -----------------------------
 def transcribe(video_path: Path, model_size: str="large-v3", language: Optional[str]=None) -> str:
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_size, device="cpu", compute_type="float16")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments, info = model.transcribe(str(video_path), beam_size=5, language=language)
     text_parts = []
     for seg in segments:
@@ -201,38 +203,42 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    step = max(1, int(seconds_between * fps))
-    ocr = PaddleOCR(use_angle_cls=True, lang="en")
-    idx = 0
-    hits: List[str] = []
-    frames_sampled = 0
-    while True:
-        ret = cap.grab()
-        if not ret:
-            break
-        if idx % step == 0:
-            ok, frame = cap.retrieve()
-            if not ok:
+
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        step = max(1, int(seconds_between * fps))
+        ocr = PaddleOCR(use_angle_cls=True, lang="en")
+        idx = 0
+        hits: List[str] = []
+        frames_sampled = 0
+        while True:
+            ret = cap.grab()
+            if not ret:
                 break
-            import cv2 as _cv2
-            gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
-            h, w = gray.shape
-            scale = 1.25 if max(h, w) < 720 else 1.0
-            if scale != 1.0:
-                gray = _cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=_cv2.INTER_CUBIC)
-            res = ocr.ocr(gray, cls=True)
-            if res and res[0]:
-                for line in res[0]:
-                    txt = line[1][0].strip()
-                    if txt and len(txt) >= 2:
-                        hits.append(txt)
-            frames_sampled += 1
-            if frames_sampled >= max_frames:
-                break
-        idx += 1
-    cap.release()
+            if idx % step == 0:
+                ok, frame = cap.retrieve()
+                if not ok:
+                    break
+                import cv2 as _cv2
+                gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+                h, w = gray.shape
+                scale = 1.25 if max(h, w) < 720 else 1.0
+                if scale != 1.0:
+                    gray = _cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=_cv2.INTER_CUBIC)
+                res = ocr.ocr(gray, cls=True)
+                if res and res[0]:
+                    for line in res[0]:
+                        txt = line[1][0].strip()
+                        if txt and len(txt) >= 2:
+                            hits.append(txt)
+                frames_sampled += 1
+                if frames_sampled >= max_frames:
+                    break
+            idx += 1
+    finally:
+        cap.release()
+
     seen = set()
     uniq = []
     for t in hits:
@@ -316,7 +322,7 @@ def combine_sources(description: str, transcript: str, ocr_lines: List[str]) -> 
                 p = p.strip()
                 if p:
                     text_candidates.append(p)
-    all_lines = ocr_lines + text_candidates
+    all_lines = (ocr_lines or []) + text_candidates
     seen = set()
     ordered = []
     for ln in all_lines:
@@ -455,6 +461,8 @@ def clean_directions(steps):
     out = []
     seen = set()
     for raw in steps:
+        if raw is None:
+            continue
         s = raw.strip()
         if not s:
             continue
@@ -585,7 +593,7 @@ def preload_models(model_size: str="large-v3", lang: str="en"):
         fw_task = progress.add_task("Downloading faster-whisper model…", start=True)
         try:
             from faster_whisper import WhisperModel
-            _ = WhisperModel(model_size, device="cpu", compute_type="float16")
+            _ = WhisperModel(model_size, device="cpu", compute_type="int8")
             progress.update(fw_task, description="✓ faster-whisper cached")
             progress.stop_task(fw_task)
         except Exception as e:
