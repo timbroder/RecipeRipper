@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -20,6 +21,7 @@ from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 # -----------------------------
 # Models / Schemas
@@ -125,7 +127,8 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
                 if info_path.exists():
                     try:
                         cached_info = json.loads(info_path.read_text())
-                    except Exception:
+                    except (json.JSONDecodeError, IOError, OSError) as e:
+                        logger.debug(f"Failed to load cached info.json for {vid_id}: {e}")
                         cached_info = None
                 break
     if cached_video:
@@ -157,9 +160,13 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
             if vidpath:
                 vid = Path(vidpath)
         else:
-            mp4s = list(tmpdir.glob("*.mp4"))
-            if mp4s:
-                vid = mp4s[0]
+            # Fallback: look for any common video file format
+            vid = None
+            for ext in ["mp4", "webm", "mkv", "flv", "avi"]:
+                videos = list(tmpdir.glob(f"*.{ext}"))
+                if videos:
+                    vid = videos[0]
+                    break
         # Save to cache
         if vid and vid_id:
             cache_path = cache_dir / f"{vid_id}{vid.suffix}"
@@ -169,16 +176,16 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
                     info_json = json.loads(p.read_text())
                     (cache_dir / f"{vid_id}.info.json").write_text(p.read_text())
                     break
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, IOError, OSError) as e:
+                    logger.debug(f"Failed to cache info.json from {p}: {e}")
             return cache_path, info_json or {}
         # fallback
         for p in tmpdir.glob("*.info.json"):
             try:
                 info_json = json.loads(p.read_text())
                 break
-            except Exception:
-                pass
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                logger.debug(f"Failed to parse info.json from {p}: {e}")
         return vid, info_json or {}
 
 # -----------------------------
@@ -220,12 +227,11 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
                 ok, frame = cap.retrieve()
                 if not ok:
                     break
-                import cv2 as _cv2
-                gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 h, w = gray.shape
                 scale = 1.25 if max(h, w) < 720 else 1.0
                 if scale != 1.0:
-                    gray = _cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=_cv2.INTER_CUBIC)
+                    gray = cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
                 res = ocr.ocr(gray, cls=True)
                 if res and res[0]:
                     for line in res[0]:
@@ -281,8 +287,8 @@ def parse_ingredient(line: str) -> Ingredient:
         try:
             notes = re.search(r"\\((.*?)\\)", rest).group(1)
             item = re.sub(r"\\(.*?\\)", "", rest).strip(",; ")
-        except Exception:
-            pass
+        except (AttributeError, re.error) as e:
+            logger.debug(f"Failed to extract notes from ingredient '{rest}': {e}")
     return Ingredient(original=line.strip(), quantity=qty, unit=unit, item=item or None, notes=notes)
 
 def looks_like_direction(line: str) -> bool:
@@ -391,7 +397,8 @@ def _to_float(qty: str):
         if "/" in s:
             return float(Fraction(s))
         return float(s)
-    except Exception:
+    except (ValueError, ZeroDivisionError) as e:
+        logger.debug(f"Failed to convert quantity '{qty}' to float: {e}")
         return None
 
 def _canon_unit(unit):
@@ -466,13 +473,13 @@ def clean_directions(steps):
         s = raw.strip()
         if not s:
             continue
-        s = re.sub(r"\\(?\\b\\d{0,2}:\\d{2}\\b\\)?", "", s)
-        s = re.sub(r"\\[\\s*\\d+:\\d{2}\\s*\\]", "", s)
-        s = re.sub(r"^\\s*(?:[-•*]|\\d+[\\).\\s-]+)\\s*", "", s)
-        s = re.sub(r"\\bmins?\\b", "minutes", s, flags=re.I)
-        s = re.sub(r"\\bhrs?\\b", "hours", s, flags=re.I)
-        s = re.sub(r"\\bdeg(?:rees)?\\s*F\\b", "°F", s, flags=re.I)
-        s = re.sub(r"\\bdeg(?:rees)?\\s* C\\b", "°C", s, flags=re.I)
+        s = re.sub(r"\(?\b\d{0,2}:\d{2}\b\)?", "", s)
+        s = re.sub(r"\[\s*\d+:\d{2}\s*\]", "", s)
+        s = re.sub(r"^\s*(?:[-•*]|\d+[\).\s-]+)\s*", "", s)
+        s = re.sub(r"\bmins?\b", "minutes", s, flags=re.I)
+        s = re.sub(r"\bhrs?\b", "hours", s, flags=re.I)
+        s = re.sub(r"\bdeg(?:rees)?\s*F\b", "°F", s, flags=re.I)
+        s = re.sub(r"\bdeg(?:rees)?\s* C\b", "°C", s, flags=re.I)
         s = _sentence_case(s)
         key = s.lower()
         if key in seen:
@@ -650,7 +657,26 @@ def main():
     parser.add_argument("--cleanup", action="store_true", help="Apply deterministic cleanup (normalize units, dedupe, tidy steps)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+
+    # Configure logging
+    if args.debug:
+        level = logging.DEBUG
+    elif args.verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    if args.verbose or args.debug:
+        logger.info(f"Starting recipe extraction with model: {args.model}")
 
     ensure_ffmpeg()
 

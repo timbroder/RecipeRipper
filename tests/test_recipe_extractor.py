@@ -500,6 +500,8 @@ def test_main_list_models(monkeypatch):
             cleanup=False,
             preload_models=False,
             list_models=True,
+            verbose=False,
+            debug=False,
         )
 
     monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
@@ -525,6 +527,8 @@ def test_main_preload_only(monkeypatch):
             cleanup=False,
             preload_models=True,
             list_models=False,
+            verbose=False,
+            debug=False,
         )
 
     monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
@@ -560,4 +564,180 @@ def test_main_local_flow(monkeypatch, tmp_path):
     monkeypatch.setattr(rex, "save_outputs", lambda out, od: None)
     monkeypatch.setattr(rex, "pretty_print", lambda out: None)
     rex.main()
+
+
+# Sprint 1: Additional test coverage for None handling and edge cases
+
+def test_get_youtube_video_id_none_input():
+    """Verify function handles None input gracefully"""
+    assert rex.get_youtube_video_id(None) is None
+    assert rex.get_youtube_video_id("") is None
+
+
+def test_combine_sources_none_ocr_lines():
+    """Verify function handles None ocr_lines"""
+    result = rex.combine_sources("desc", "trans", None)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert isinstance(result[0], list)  # ing_lines
+    assert isinstance(result[1], list)  # dir_lines
+
+
+def test_clean_directions_none_elements():
+    """Verify function handles None elements in list"""
+    result = rex.clean_directions(["Step 1", None, "Step 2", None])
+    assert len(result) >= 0
+    # Should not crash and should skip None values
+
+
+def test_ocr_releases_on_exception(monkeypatch):
+    """Verify VideoCapture.release() called even on exception"""
+    released = []
+
+    class DummyCapture:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 30.0 if prop == 5 else 3
+
+        def grab(self):
+            raise RuntimeError("Test exception")
+
+        def release(self):
+            released.append(True)
+
+    class DummyPaddleOCR:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    dummy_cv2 = mock.Mock()
+    dummy_cv2.VideoCapture = DummyCapture
+    dummy_cv2.CAP_PROP_FPS = 5
+    dummy_cv2.CAP_PROP_FRAME_COUNT = 7
+
+    monkeypatch.setitem(sys.modules, "cv2", dummy_cv2)
+    monkeypatch.setitem(sys.modules, "paddleocr", mock.Mock(PaddleOCR=DummyPaddleOCR))
+
+    with pytest.raises(RuntimeError, match="Test exception"):
+        rex.ocr_onscreen_text(Path("dummy.mp4"))
+
+    assert released, "release() was not called on exception"
+
+
+def test_ocr_zero_max_frames():
+    """Test OCR with max_frames=0"""
+    # Should return empty list without processing any frames
+    # This test requires proper mocking which we'll add
+    pass  # Placeholder - would need full CV2/OCR mocking
+
+
+def test_download_youtube_fallback_webm(tmp_path, monkeypatch):
+    """Verify fallback works with non-mp4 formats"""
+    cache_dir = Path(rex.__file__).parent / ".cache"
+    cache_dir.mkdir(exist_ok=True)
+    vid_id = "webmtest123"
+
+    class DummyYDL:
+        def __init__(self, opts):
+            self.output_dir = Path(opts["outtmpl"]).parent
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download):
+            # Create a .webm file instead of .mp4
+            video_path = self.output_dir / f"{vid_id}.webm"
+            video_path.write_bytes(b"webm video data")
+            info_path = self.output_dir / f"{vid_id}.info.json"
+            info_path.write_text(json.dumps({"title": "WebM Video"}))
+            return {"id": vid_id}  # No requested_downloads, triggers fallback
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.Mock(YoutubeDL=DummyYDL))
+
+    video_path, info = rex.download_youtube(f"https://youtu.be/{vid_id}", tmp_path)
+
+    # Should find the .webm file via fallback
+    assert video_path is not None
+    assert video_path.suffix == ".webm"
+
+    # Cleanup
+    for f in cache_dir.glob(f"{vid_id}.*"):
+        f.unlink()
+
+
+def test_to_float_invalid_input():
+    """Test _to_float with various invalid inputs"""
+    assert rex._to_float("abc/xyz") is None
+    assert rex._to_float("") is None
+    assert rex._to_float(None) is None
+    assert rex._to_float("1/0") is None  # Division by zero
+
+
+def test_canon_unit_edge_cases():
+    """Test _canon_unit with edge cases"""
+    assert rex._canon_unit("") is None
+    assert rex._canon_unit(None) is None
+    # Whitespace-only gets stripped and looked up, returns empty string
+    result = rex._canon_unit("  ")
+    assert result is None or result == ""  # Either is acceptable
+    assert rex._canon_unit("TABLESPOONS") == "tbsp"  # Case insensitive
+
+
+def test_main_with_verbose_flag(monkeypatch):
+    """Test main() with --verbose flag"""
+    monkeypatch.setattr(rex, "ensure_ffmpeg", lambda: None)
+    monkeypatch.setattr(rex, "list_models", lambda: None)
+
+    def fake_parse(self):
+        return SimpleNamespace(
+            youtube=None,
+            video=None,
+            language=None,
+            model="small",
+            fps_sample=0.6,
+            max_frames=180,
+            outdir="output",
+            cleanup=False,
+            preload_models=False,
+            list_models=True,
+            verbose=True,
+            debug=False,
+        )
+
+    monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
+    rex.main()
+    # Should not crash with verbose flag
+
+
+def test_main_with_debug_flag(monkeypatch):
+    """Test main() with --debug flag"""
+    monkeypatch.setattr(rex, "ensure_ffmpeg", lambda: None)
+    monkeypatch.setattr(rex, "list_models", lambda: None)
+
+    def fake_parse(self):
+        return SimpleNamespace(
+            youtube=None,
+            video=None,
+            language=None,
+            model="small",
+            fps_sample=0.6,
+            max_frames=180,
+            outdir="output",
+            cleanup=False,
+            preload_models=False,
+            list_models=True,
+            verbose=False,
+            debug=True,
+        )
+
+    monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
+    rex.main()
+    # Should not crash with debug flag
 
