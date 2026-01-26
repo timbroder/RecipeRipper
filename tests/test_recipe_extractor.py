@@ -227,13 +227,7 @@ class DummyCapture:
 
 
 def test_ocr_onscreen_text(monkeypatch):
-    seen = []
-
-    def fake_cvtColor(frame, code):
-        seen.append("cvt")
-        gray = mock.Mock()
-        gray.shape = (10, 10)
-        return gray
+    ocr_calls = []
 
     def fake_resize(frame, size, interpolation):
         return frame
@@ -242,15 +236,14 @@ def test_ocr_onscreen_text(monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def ocr(self, frame, cls=True):
-            return [[((0, 0, 0, 0), ("Ingredient", 0.9))]]
+        def predict(self, frame):
+            ocr_calls.append("predict")
+            return [{'rec_texts': ['Ingredient'], 'rec_scores': [0.9]}]
 
     dummy_cv2 = mock.Mock(
         VideoCapture=DummyCapture,
         CAP_PROP_FPS=5,
         CAP_PROP_FRAME_COUNT=7,
-        cvtColor=fake_cvtColor,
-        COLOR_BGR2GRAY=0,
         resize=fake_resize,
         INTER_CUBIC=0,
     )
@@ -260,7 +253,7 @@ def test_ocr_onscreen_text(monkeypatch):
 
     lines = rex.ocr_onscreen_text(Path("dummy.mp4"), seconds_between=0.1, max_frames=2)
     assert lines == ["Ingredient"]
-    assert seen
+    assert ocr_calls
 
 
 def test_parsing_helpers(monkeypatch):
@@ -350,6 +343,9 @@ def test_process_youtube(monkeypatch, tmp_path):
         fps_sample=0.5,
         max_frames=2,
         cleanup=True,
+        use_local=False,
+        local_model="llama3.1:8b-instruct",
+        openai_model="gpt-4o-mini",
     )
 
     dummy_video = tmp_path / "video.mp4"
@@ -358,7 +354,7 @@ def test_process_youtube(monkeypatch, tmp_path):
     monkeypatch.setattr(rex, "download_youtube", lambda url, td: (dummy_video, {"title": "Title", "description": "Desc"}))
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Mix well")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 cup sugar"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o: (["1 cup sugar"], ["Mix well"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
     original_sub = rex.re.sub
 
     def safe_sub(pattern, repl, string, count=0, flags=0):
@@ -382,6 +378,9 @@ def test_process_local_success(monkeypatch, tmp_path):
         fps_sample=0.5,
         max_frames=2,
         cleanup=False,
+        use_local=False,
+        local_model="llama3.1:8b-instruct",
+        openai_model="gpt-4o-mini",
     )
 
     video_file = tmp_path / "local.mp4"
@@ -389,7 +388,7 @@ def test_process_local_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Chop onions")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 onion"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o: (["1 onion"], ["Chop onions"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 onion"], ["Chop onions"]))
 
     result = rex.process_local(str(video_file), args)
     assert result.title == "local"
@@ -560,4 +559,240 @@ def test_main_local_flow(monkeypatch, tmp_path):
     monkeypatch.setattr(rex, "save_outputs", lambda out, od: None)
     monkeypatch.setattr(rex, "pretty_print", lambda out: None)
     rex.main()
+
+
+# -----------------------------
+# LLM backend tests
+# -----------------------------
+
+
+def test_ask_openai(monkeypatch):
+    """Test ask_openai with mocked OpenAI client."""
+    class DummyMessage:
+        content = "Hello from GPT"
+
+    class DummyChoice:
+        message = DummyMessage()
+
+    class DummyResponse:
+        choices = [DummyChoice()]
+
+    class DummyCompletions:
+        def create(self, model, messages, temperature):
+            assert model == "gpt-4o-mini"
+            assert messages[0]["role"] == "user"
+            return DummyResponse()
+
+    class DummyChat:
+        completions = DummyCompletions()
+
+    class DummyClient:
+        chat = DummyChat()
+
+    dummy_openai = mock.Mock()
+    dummy_openai.OpenAI.return_value = DummyClient()
+    monkeypatch.setitem(sys.modules, "openai", dummy_openai)
+
+    result = rex.ask_openai("test prompt", "gpt-4o-mini")
+    assert result == "Hello from GPT"
+
+
+def test_ask_local_model(monkeypatch):
+    """Test ask_local_model with mocked urllib."""
+    response_data = json.dumps({"response": "Local model reply"}).encode()
+
+    class FakeResponse:
+        def read(self):
+            return response_data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        assert "generate" in req.full_url
+        body = json.loads(req.data.decode())
+        assert body["model"] == "llama3.1:8b-instruct"
+        assert body["prompt"] == "test prompt"
+        return FakeResponse()
+
+    monkeypatch.setattr(rex.urllib.request, "urlopen", fake_urlopen)
+
+    result = rex.ask_local_model("test prompt", "llama3.1:8b-instruct")
+    assert result == "Local model reply"
+
+
+def test_llm_extract_recipe_openai(monkeypatch):
+    """Test llm_extract_recipe with mocked OpenAI returning valid JSON."""
+    llm_json = json.dumps({
+        "ingredients": ["1 cup flour", "2 eggs", "1/2 cup milk"],
+        "directions": ["Preheat oven to 350°F", "Mix dry ingredients", "Bake for 25 minutes"],
+    })
+
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    ing, dirs = rex.llm_extract_recipe(
+        description="A simple cake recipe",
+        transcript="First preheat the oven. Mix the dry ingredients.",
+        ocr_lines=["1 cup flour", "2 eggs"],
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert ing == ["1 cup flour", "2 eggs", "1/2 cup milk"]
+    assert dirs == ["Preheat oven to 350°F", "Mix dry ingredients", "Bake for 25 minutes"]
+
+
+def test_llm_extract_recipe_local(monkeypatch):
+    """Test llm_extract_recipe with mocked local Ollama model."""
+    llm_json = json.dumps({
+        "ingredients": ["2 cloves garlic"],
+        "directions": ["Mince the garlic"],
+    })
+
+    monkeypatch.setattr(rex, "ensure_local_model", lambda model: None)
+    monkeypatch.setattr(rex, "ask_local_model", lambda prompt, model: llm_json)
+
+    ing, dirs = rex.llm_extract_recipe(
+        description="",
+        transcript="Mince the garlic cloves",
+        ocr_lines=[],
+        use_local=True,
+        model="llama3.1:8b-instruct",
+    )
+    assert ing == ["2 cloves garlic"]
+    assert dirs == ["Mince the garlic"]
+
+
+def test_llm_extract_recipe_with_code_fences(monkeypatch):
+    """Test that markdown code fences in LLM response are handled."""
+    llm_response = '```json\n{"ingredients": ["1 cup sugar"], "directions": ["Stir well"]}\n```'
+
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_response)
+
+    ing, dirs = rex.llm_extract_recipe(
+        description="",
+        transcript="Stir sugar well",
+        ocr_lines=[],
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert ing == ["1 cup sugar"]
+    assert dirs == ["Stir well"]
+
+
+def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
+    """Test fallback to heuristic parsing when LLM returns invalid JSON."""
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: "not valid json at all")
+
+    # The fallback calls combine_sources without LLM params — mock it
+    original_combine = rex.combine_sources
+
+    def mock_combine(desc, trans, ocr, use_local=None, llm_model=None):
+        if use_local is None and llm_model is None:
+            return (["fallback ingredient"], ["fallback direction"])
+        return original_combine(desc, trans, ocr, use_local=use_local, llm_model=llm_model)
+
+    monkeypatch.setattr(rex, "combine_sources", mock_combine)
+
+    ing, dirs = rex.llm_extract_recipe(
+        description="",
+        transcript="fallback test",
+        ocr_lines=[],
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert ing == ["fallback ingredient"]
+    assert dirs == ["fallback direction"]
+
+
+def test_ensure_local_model_already_present(monkeypatch):
+    """Test ensure_local_model when model is already available."""
+    tags_response = json.dumps({
+        "models": [{"name": "llama3.1:8b-instruct"}]
+    }).encode()
+
+    class FakeResponse:
+        def read(self):
+            return tags_response
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    monkeypatch.setattr(rex.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse())
+
+    # Should return without error
+    rex.ensure_local_model("llama3.1:8b-instruct")
+
+
+def test_ensure_local_model_pull_needed(monkeypatch):
+    """Test ensure_local_model when model needs to be pulled."""
+    call_count = {"n": 0}
+
+    class FakeTagsResponse:
+        def read(self):
+            return json.dumps({"models": []}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    class FakePullResponse:
+        def read(self):
+            return b'{"status":"success"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        call_count["n"] += 1
+        if "tags" in (req.full_url if hasattr(req, "full_url") else req):
+            return FakeTagsResponse()
+        return FakePullResponse()
+
+    monkeypatch.setattr(rex.urllib.request, "urlopen", fake_urlopen)
+
+    rex.ensure_local_model("llama3.1:8b-instruct")
+    assert call_count["n"] == 2  # tags + pull
+
+
+def test_combine_sources_with_llm(monkeypatch):
+    """Test that combine_sources delegates to LLM when use_local is not None and model is set."""
+    llm_json = json.dumps({
+        "ingredients": ["1 lb chicken"],
+        "directions": ["Grill the chicken"],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    ing, dirs = rex.combine_sources(
+        description="Grilled chicken recipe",
+        transcript="Grill the chicken for 10 minutes",
+        ocr_lines=["1 lb chicken"],
+        use_local=False,
+        llm_model="gpt-4o-mini",
+    )
+    assert ing == ["1 lb chicken"]
+    assert dirs == ["Grill the chicken"]
+
+
+def test_combine_sources_without_llm():
+    """Test that combine_sources falls back to heuristic when no LLM params."""
+    ing, dirs = rex.combine_sources(
+        description="1 cup sugar. Stir well.",
+        transcript="Bake for 10 minutes.",
+        ocr_lines=["Sprinkle nuts"],
+    )
+    # Should use heuristic path (no assertion on specific results,
+    # just verify it returns the right shape)
+    assert isinstance(ing, list)
+    assert isinstance(dirs, list)
 
