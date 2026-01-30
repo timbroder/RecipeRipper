@@ -8,5 +8,6 @@ pydantic
 rich
 tqdm
 openai
+python-dotenv
 pytest
 pytest-cov

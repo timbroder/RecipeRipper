@@ -14,7 +14,10 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+load_dotenv()
 from rich.console import Console
 from rich.table import Table
 from rich import box
