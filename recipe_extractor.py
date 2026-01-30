@@ -21,6 +21,12 @@ from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
+VERBOSE = False
+
+def vlog(msg: str) -> None:
+    """Log a message only when verbose mode is enabled."""
+    if VERBOSE:
+        console.log(msg)
 
 # -----------------------------
 # Models / Schemas
@@ -977,19 +983,28 @@ def _process_directions(dir_lines: List[str], cleanup: bool) -> List[str]:
 def process_youtube(url: str, args) -> RecipeOutput:
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
+        vlog(f"[cyan]Downloading YouTube video: {url}")
         video_path, info = download_youtube(url, tmpdir)
         if not video_path or not video_path.exists():
             console.print("[red]Download failed or no video file found.")
             sys.exit(2)
         title = info.get("title")
         description = info.get("description") or ""
+        vlog(f"[cyan]Title: {title}")
+        vlog(f"[cyan]Description length: {len(description)} chars")
         use_local = getattr(args, "use_local", False)
         llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
+        vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
 
         # Try extracting from description alone when LLM mode is active
         desc_result = None
         if llm_model:
+            vlog("[cyan]Attempting description-first extraction…")
             desc_result = llm_extract_from_description(description, use_local, llm_model)
+            if desc_result is None:
+                vlog("[yellow]Description-first extraction returned no complete recipe.")
+            else:
+                vlog(f"[green]Description-first extraction found {len(desc_result[0])} ingredients, {len(desc_result[1])} directions.")
 
         if desc_result is not None:
             ing_lines, dir_lines = desc_result
@@ -997,12 +1012,19 @@ def process_youtube(url: str, args) -> RecipeOutput:
             ocr_lines: List[str] = []
             console.log("[green]Recipe extracted from description — skipping video transcription/OCR.")
         else:
+            vlog("[cyan]Starting transcription…")
             transcript = transcribe(video_path, model_size=args.model, language=args.language)
+            vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
+            vlog("[cyan]Starting OCR…")
             ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
+            vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
+            vlog("[cyan]Combining sources…")
             ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
 
+        vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
         ingredients = [parse_ingredient(l) for l in ing_lines]
         if args.cleanup:
+            vlog("[cyan]Running cleanup…")
             ingredients = clean_ingredients(ingredients)
         out = RecipeOutput(
             title=title,
@@ -1020,13 +1042,22 @@ def process_local(video_file: str, args) -> RecipeOutput:
         console.print(f"[red]Video not found: {vp}")
         sys.exit(2)
     title = vp.stem
+    vlog(f"[cyan]Processing local video: {vp}")
+    vlog("[cyan]Starting transcription…")
     transcript = transcribe(vp, model_size=args.model, language=args.language)
+    vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
+    vlog("[cyan]Starting OCR…")
     ocr_lines = ocr_onscreen_text(vp, seconds_between=args.fps_sample, max_frames=args.max_frames)
+    vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
     use_local = getattr(args, "use_local", False)
     llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
+    vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
+    vlog("[cyan]Combining sources…")
     ing_lines, dir_lines = combine_sources("", transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+    vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
     ingredients = [parse_ingredient(l) for l in ing_lines]
     if args.cleanup:
+        vlog("[cyan]Running cleanup…")
         ingredients = clean_ingredients(ingredients)
     out = RecipeOutput(
         title=title,
@@ -1153,7 +1184,11 @@ def main():
     parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model name (default: gpt-4o-mini)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging of each pipeline step")
     args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     ensure_ffmpeg()
 

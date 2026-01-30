@@ -500,6 +500,7 @@ def test_main_list_models(monkeypatch):
             cleanup=False,
             preload_models=False,
             list_models=True,
+            verbose=False,
         )
 
     monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
@@ -525,6 +526,7 @@ def test_main_preload_only(monkeypatch):
             cleanup=False,
             preload_models=True,
             list_models=False,
+            verbose=False,
         )
 
     monkeypatch.setattr(rex.argparse.ArgumentParser, "parse_args", fake_parse, raising=False)
