@@ -1357,7 +1357,7 @@ def main():
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")
     parser.add_argument("--cleanup", action="store_true", help="Apply deterministic cleanup (normalize units, dedupe, tidy steps)")
     parser.add_argument("--use-local", action="store_true", help="Use a local Ollama model instead of OpenAI for recipe extraction")
-    parser.add_argument("--local-model", default="llama3.1:8b", help="Ollama model name (default: llama3.1:8b)")
+    parser.add_argument("--local-model", default="qwen3:8b", help="Ollama model name (default: qwen3:8b)")
     parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model name (default: gpt-4o-mini)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
