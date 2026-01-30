@@ -1,90 +1,115 @@
-# Recipe Video Extractor (YouTube or Local File)
+# RecipeRipper
 
-[![Tests](https://github.com/RecipeRipper/RecipeRipper/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/RecipeRipper/RecipeRipper/actions/workflows/tests.yml)
+[![Tests](https://github.com/timbroder/RecipeRipper/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/timbroder/RecipeRipper/actions/workflows/tests.yml)
 
 Extract structured **ingredients** and **directions** from a recipe video — works with a **YouTube URL** (incl. Shorts) or a **local file**.
 
-## What it does
-- Downloads video + description JSON (if YouTube) using `yt-dlp`
-- Transcribes speech locally with `faster-whisper` (no API keys)
-- OCRs on-screen text from sampled frames via `PaddleOCR`
-- Merges description + transcript + on-screen text
-- Heuristically splits **Ingredients** vs **Directions**
-- Outputs:
-  - `output/recipe.json` (structured)
-  - `output/recipe.md` (human-readable)
+## How it works
 
-## Install (macOS/Linux)
-> You need Python 3.10+ and `ffmpeg`.
+1. **Download** the video and description (YouTube) or read from disk (local file)
+2. **Description-first check** — when LLM extraction is active, the description is sent to the LLM first. If it contains a complete recipe (at least 2 ingredients and 1 direction), transcription and OCR are skipped entirely.
+3. **Transcribe** speech with `faster-whisper` (local, no API keys)
+4. **OCR** on-screen text from sampled frames via `PaddleOCR`
+5. **Extract** ingredients and directions using an LLM (OpenAI or Ollama), with a heuristic fallback
+6. **Cleanup** (optional) — normalize units, deduplicate ingredients, tidy directions
+7. **Output** `recipe.json` (structured) and `recipe.md` (human-readable)
+
+## Requirements
+
+- Python 3.10+
+- `ffmpeg`
+- **OpenAI API key** (for default LLM extraction) _or_ a running **Ollama** instance (for local extraction)
+
+## Installation
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # If you don't have ffmpeg:
-#   macOS (brew): brew install ffmpeg
-#   Ubuntu/Debian: sudo apt-get install -y ffmpeg
+#   macOS:          brew install ffmpeg
+#   Ubuntu/Debian:  sudo apt-get install -y ffmpeg
+
+# Set your OpenAI key (required for default LLM extraction):
+export OPENAI_API_KEY="sk-..."
 ```
 
 ## Usage
+
 ```bash
-# From this folder:
-python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX"
+# YouTube (uses OpenAI by default)
+python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup
 
-# OR local file:
-python recipe_extractor.py --video "/path/to/video.mp4"
+# Local video
+python recipe_extractor.py --video "/path/to/video.mp4" --cleanup
 
-# Options
-#   --language en            # whisper language hint (auto by default)
-#   --model small            # faster-whisper model size: tiny/base/small/medium/large-v3
-#   --fps-sample 0.5         # seconds between OCR frames (default 0.6s)
-#   --max-frames 180         # OCR at most N frames
-#   --outdir output          # where JSON/MD goes
-#   --cleanup                # normalize units, fractions, dedupe ingredients, tidy steps
+# Use a local Ollama model instead of OpenAI
+python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup --use-local
+
+# Verbose output — logs each pipeline step
+python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup --verbose
 ```
 
-### 🧪 Quick Test Example
-```bash
-# Example 1 — YouTube Short
-python recipe_extractor.py   --youtube "https://www.youtube.com/shorts/5fEwO2kS64A"   --model small   --cleanup   --outdir output
+### CLI reference
 
-# Example 2 — Local video
-python recipe_extractor.py   --video "/Users/you/Videos/pancake_recipe.mp4"   --model small   --fps-sample 0.5   --max-frames 150   --cleanup   --outdir output
-```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--youtube` | string | — | YouTube URL (works with Shorts). Mutually exclusive with `--video`. |
+| `--video` | string | — | Path to a local video file. Mutually exclusive with `--youtube`. |
+| `--language` | string | auto-detect | Language hint for transcription (e.g. `en`, `es`, `fr`) |
+| `--model` | string | `small` | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `--fps-sample` | float | `0.6` | Seconds between OCR frames |
+| `--max-frames` | int | `180` | Maximum number of frames to OCR |
+| `--outdir` | string | `output` | Directory for `recipe.json` and `recipe.md` |
+| `--cleanup` | flag | off | Normalize units, deduplicate ingredients, tidy directions |
+| `--use-local` | flag | off | Use a local Ollama model instead of OpenAI |
+| `--local-model` | string | `llama3.1:8b-instruct` | Ollama model name |
+| `--openai-model` | string | `gpt-4o-mini` | OpenAI model name |
+| `--preload-models` | flag | off | Download/cache ASR and OCR models for offline use |
+| `--list-models` | flag | off | Show recommended faster-whisper sizes and resource needs |
+| `--verbose` | flag | off | Log each pipeline step to the console |
+
+## LLM extraction
+
+By default, raw text (description + transcript + OCR) is sent to an LLM which returns structured ingredients and directions. If the LLM is unavailable or the response can't be parsed, extraction falls back to heuristic regex-based classification.
+
+- **OpenAI (default)** — requires `OPENAI_API_KEY`. Model can be changed with `--openai-model`.
+- **Ollama (local)** — pass `--use-local`. Requires a running Ollama instance. Model can be changed with `--local-model`.
+- **Description-first optimization** — when LLM extraction is active and a YouTube video has a text description, the LLM tries extracting from the description alone first. If it finds a complete recipe (>= 2 ingredients, >= 1 direction), the expensive transcription and OCR steps are skipped.
 
 ## Cleanup mode
-Add `--cleanup` to normalize ingredients (units, fractions, dedupe) and tidy directions (remove timestamps, fix casing, merge fragments).
 
-Example:
-```bash
-python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup
-```
+Add `--cleanup` to post-process the extracted recipe:
+- Normalize units and fractions in ingredients
+- Merge duplicate ingredients
+- Remove timestamps, fix casing, and deduplicate directions
 
-## Running tests
-The project uses `pytest` for its unit and integration tests.
+## Offline prep
 
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-pytest
-```
+Cache the ASR and OCR models ahead of time (useful for air-gapped machines):
 
-### Continuous integration
-
-GitHub Actions automatically runs the test suite for every pull request and for pushes to the `main` branch via the `Tests` workflow in `.github/workflows/tests.yml`. Mark the "Tests" status check as required in your branch protection rules to prevent merges when the suite fails.
-
-
-## Offline prep (optional)
-To cache all models ahead of time (useful for travel/air-gapped machines), run:
 ```bash
 python recipe_extractor.py --preload-models --model small --language en
 ```
-This downloads the faster‑whisper ASR model you specify (e.g., `small`) and the PaddleOCR English models to your local cache.
 
+List available faster-whisper model sizes:
 
-## List available ASR model sizes
-See recommended Faster‑Whisper sizes and rough resource needs:
 ```bash
 python recipe_extractor.py --list-models
 ```
+
+## Output
+
+Results are saved to the `--outdir` directory (default `output/`):
+
+- **`recipe.json`** — structured JSON with `title`, `url`, `ingredients`, `directions`, `extras`, and `raw_sources`
+- **`recipe.md`** — human-readable Markdown
+
+## Running tests
+
+```bash
+pytest
+```
+
+GitHub Actions runs the test suite on every pull request and push to `main`. See the Tests badge above.
