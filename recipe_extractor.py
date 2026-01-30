@@ -302,11 +302,13 @@ def ensure_local_model(model: str) -> None:
 
     console.print(f"[yellow]Pulling Ollama model '{model}' …")
     pull_url = "http://localhost:11434/api/pull"
+    max_pull_attempts = 5
     last_exc: Optional[Exception] = None
-    for attempt in range(3):
+    for attempt in range(max_pull_attempts):
         if attempt > 0:
-            time.sleep(2)
-            console.print(f"[yellow]Retrying pull (attempt {attempt + 1}/3)…")
+            delay = min(2 ** attempt, 16)  # 2, 4, 8, 16
+            console.print(f"[yellow]Retrying pull in {delay}s (attempt {attempt + 1}/{max_pull_attempts})…")
+            time.sleep(delay)
         body = json.dumps({"name": model, "stream": False}).encode()
         req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
         try:
