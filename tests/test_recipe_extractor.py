@@ -926,3 +926,132 @@ def test_process_youtube_falls_through_on_description_miss(monkeypatch, tmp_path
     assert result.ingredients
     assert result.directions
 
+
+# -----------------------------
+# Cross-reference check tests
+# -----------------------------
+
+
+@pytest.mark.parametrize(
+    "word, expected",
+    [
+        ("onions", "onion"),
+        ("tomatoes", "tomato"),
+        ("berries", "berry"),
+        ("leaves", "leaf"),
+        ("sauces", "sauce"),
+        ("carrots", "carrot"),
+        ("potatoes", "potato"),
+        ("sugar", "sugar"),
+        ("cabbages", "cabbage"),
+        ("dishes", "dishe"),  # linguistic imperfection is OK per spec
+    ],
+)
+def test_normalize_word(word, expected):
+    assert rex._normalize_word(word) == expected
+
+
+def test_extract_food_words_from_text():
+    found = rex._extract_food_words_from_text("Add olive oil and garlic to the pan")
+    assert "olive oil" in {fw for fw in rex.FOOD_WORDS if rex._normalize_word(fw) in found}
+    assert rex._normalize_word("garlic") in found
+
+    empty = rex._extract_food_words_from_text("Turn on the stove and wait")
+    assert len(empty) == 0
+
+
+def test_cross_reference_unused_ingredient():
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 cup flour", item="flour"),
+            rex.Ingredient(original="1 tsp vanilla", item="vanilla"),
+        ],
+        directions=["Mix the flour with water"],
+    )
+    warnings = rex.cross_reference_check(recipe)
+    assert any("vanilla" in w.lower() for w in warnings)
+
+
+def test_cross_reference_missing_ingredient():
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 cup flour", item="flour"),
+        ],
+        directions=["Mix the flour with butter and eggs"],
+    )
+    warnings = rex.cross_reference_check(recipe)
+    assert any("butter" in w.lower() for w in warnings)
+    assert any("egg" in w.lower() for w in warnings)
+
+
+def test_cross_reference_no_warnings():
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 cup flour", item="flour"),
+            rex.Ingredient(original="2 eggs", item="eggs"),
+        ],
+        directions=["Mix the flour and eggs together"],
+    )
+    warnings = rex.cross_reference_check(recipe)
+    assert warnings == []
+
+
+def test_cross_reference_plural_matching():
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 onion", item="onion"),
+        ],
+        directions=["Dice the onions and saut\u00e9"],
+    )
+    warnings = rex.cross_reference_check(recipe)
+    unused = [w for w in warnings if "Unused" in w]
+    assert len(unused) == 0
+
+
+def test_cross_reference_empty_recipe():
+    recipe = rex.RecipeOutput()
+    warnings = rex.cross_reference_check(recipe)
+    assert warnings == []
+
+
+def test_cross_reference_stored_in_recipe():
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 cup sugar", item="sugar"),
+            rex.Ingredient(original="1 tsp vanilla", item="vanilla"),
+        ],
+        directions=["Stir the sugar into the batter"],
+    )
+    rex.cross_reference_check(recipe)
+    assert recipe.warnings
+    assert any("vanilla" in w.lower() for w in recipe.warnings)
+
+
+def test_save_outputs_with_warnings(tmp_path, monkeypatch):
+    ingredient = rex.Ingredient(original="1 cup sugar", quantity="1", unit="cup", item="sugar", notes=None)
+    recipe = rex.RecipeOutput(
+        title="Cake",
+        url="https://example.com",
+        ingredients=[ingredient],
+        directions=["Mix"],
+        extras={"ocr_samples": []},
+        raw_sources={"description": "", "transcript": ""},
+        warnings=["Unused ingredient: vanilla", "Missing ingredient: butter"],
+    )
+
+    def fake_dump(self, indent=2, ensure_ascii=False):
+        return json.dumps(self.model_dump(), indent=indent)
+
+    monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
+    outdir = tmp_path / "output"
+    rex.save_outputs(recipe, outdir)
+
+    md_text = (outdir / "recipe.md").read_text()
+    assert "## Warnings" in md_text
+    assert "Unused ingredient: vanilla" in md_text
+    assert "Missing ingredient: butter" in md_text
+
+    json_data = json.loads((outdir / "recipe.json").read_text())
+    assert "warnings" in json_data
+    assert len(json_data["warnings"]) == 2
+

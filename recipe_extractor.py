@@ -46,6 +46,7 @@ class RecipeOutput(BaseModel):
     directions: List[str] = Field(default_factory=list)
     extras: Dict[str, List[str]] = Field(default_factory=dict)
     raw_sources: Dict[str, str] = Field(default_factory=dict)  # transcript, description
+    warnings: List[str] = Field(default_factory=list)
 
 # -----------------------------
 # Utilities
@@ -971,6 +972,70 @@ def clean_directions(steps):
     return merged
 
 # -----------------------------
+# Cross-reference check
+# -----------------------------
+
+def _normalize_word(word: str) -> str:
+    """Simple plural stripping for food-word matching."""
+    w = word.lower().strip()
+    if len(w) > 3 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("ves"):
+        return w[:-3] + "f"
+    if len(w) > 2 and w.endswith("es"):
+        stem = w[:-2]
+        if stem.endswith(("ch", "sh", "ss")):
+            return w[:-1]
+        if stem.endswith(("c", "g", "x", "z")):
+            return w[:-1]
+        return stem
+    if len(w) > 1 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _extract_food_words_from_text(text: str) -> set:
+    """Return normalized food words found in *text*."""
+    text_lower = text.lower()
+    found = set()
+    # Multi-word food items: exact phrase match
+    for fw in FOOD_WORDS:
+        if " " in fw and re.search(r"\b" + re.escape(fw) + r"\b", text_lower):
+            found.add(_normalize_word(fw))
+    # Single-word food items: normalize every token so plurals match
+    text_normalized = {_normalize_word(w) for w in re.findall(r"\b\w+\b", text_lower)}
+    for fw in FOOD_WORDS:
+        if " " not in fw and _normalize_word(fw) in text_normalized:
+            found.add(_normalize_word(fw))
+    return found
+
+
+def cross_reference_check(recipe: RecipeOutput) -> List[str]:
+    """Flag unused ingredients and missing ingredients."""
+    warnings: List[str] = []
+    if not recipe.ingredients or not recipe.directions:
+        return warnings
+
+    directions_text = " ".join(recipe.directions)
+    directions_food = _extract_food_words_from_text(directions_text)
+
+    all_ingredient_food: set = set()
+    for ing in recipe.ingredients:
+        item_text = ing.item or ing.original
+        item_food = _extract_food_words_from_text(item_text)
+        all_ingredient_food.update(item_food)
+        if item_food and not (item_food & directions_food):
+            warnings.append(f"Unused ingredient: {item_text}")
+
+    missing = directions_food - all_ingredient_food
+    for word in sorted(missing):
+        warnings.append(f"Missing ingredient: {word}")
+
+    recipe.warnings = warnings
+    return warnings
+
+
+# -----------------------------
 # Main pipeline
 # -----------------------------
 
@@ -1091,6 +1156,11 @@ def save_outputs(out: RecipeOutput, outdir: Path):
             md.append(f"{i}. {step}")
     else:
         md.append("_None detected_")
+    if out.warnings:
+        md.append("")
+        md.append("## Warnings")
+        for w in out.warnings:
+            md.append(f"- {w}")
     (outdir / "recipe.md").write_text("\n".join(md))
 
 def pretty_print(out: RecipeOutput):
@@ -1111,6 +1181,9 @@ def pretty_print(out: RecipeOutput):
     else:
         dir_txt = "None"
     table.add_row("Directions", dir_txt)
+    if out.warnings:
+        warn_txt = "\n".join(f"- {w}" for w in out.warnings)
+        table.add_row("Warnings", warn_txt, style="yellow")
     console.print(table)
 
 
@@ -1207,6 +1280,10 @@ def main():
         out = process_youtube(args.youtube, args)
     else:
         out = process_local(args.video, args)
+
+    warnings = cross_reference_check(out)
+    if warnings:
+        vlog(f"[yellow]Cross-reference check found {len(warnings)} warning(s).")
 
     save_outputs(out, Path(args.outdir))
     pretty_print(out)
