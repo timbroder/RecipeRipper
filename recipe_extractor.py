@@ -1144,10 +1144,12 @@ def _slugify(text: str) -> str:
     return s or "recipe"
 
 
-def save_outputs(out: RecipeOutput, outdir: Path):
+def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
     outdir.mkdir(parents=True, exist_ok=True)
     slug = _slugify(out.title) if out.title else "recipe"
-    (outdir / f"{slug}.json").write_text(out.model_dump_json(indent=2, ensure_ascii=False))
+    json_path = outdir / f"{slug}.json"
+    md_path = outdir / f"{slug}.md"
+    json_path.write_text(out.model_dump_json(indent=2, ensure_ascii=False))
     md = ["# Recipe Extraction"]
     if out.title:
         md.append(f"**Title:** {out.title}")
@@ -1172,7 +1174,24 @@ def save_outputs(out: RecipeOutput, outdir: Path):
         md.append("## Warnings")
         for w in out.warnings:
             md.append(f"- {w}")
-    (outdir / f"{slug}.md").write_text("\n".join(md))
+    md_path.write_text("\n".join(md))
+    return json_path, md_path
+
+def publish_gist(files: List[Path]) -> None:
+    """Upload files to a public GitHub Gist via the gh CLI."""
+    if not shutil.which("gh"):
+        console.print("[red]The 'gh' CLI is required for --publish. Install from https://cli.github.com/")
+        sys.exit(1)
+    result = subprocess.run(
+        ["gh", "gist", "create", "--public", *[str(f) for f in files]],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]Failed to create gist: {result.stderr.strip()}")
+        sys.exit(1)
+    console.print(f"[green]Gist created: {result.stdout.strip()}")
+
 
 def pretty_print(out: RecipeOutput):
     table = Table(title="Extracted Recipe", box=box.SIMPLE, show_lines=False)
@@ -1269,6 +1288,7 @@ def main():
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging of each pipeline step")
+    parser.add_argument("--publish", action="store_true", help="Upload output files to a public GitHub Gist (requires gh CLI)")
     args = parser.parse_args()
 
     global VERBOSE
@@ -1296,8 +1316,10 @@ def main():
     if warnings:
         vlog(f"[yellow]Cross-reference check found {len(warnings)} warning(s).")
 
-    save_outputs(out, Path(args.outdir))
+    saved = save_outputs(out, Path(args.outdir))
     pretty_print(out)
+    if args.publish:
+        publish_gist(list(saved))
 
 if __name__ == "__main__":
     main()
