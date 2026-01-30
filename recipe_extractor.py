@@ -325,6 +325,9 @@ def ensure_local_model(model: str) -> None:
             last_exc = exc
             last_detail = error_body
             console.print(f"[dim]Pull returned HTTP {exc.code}: {error_body or exc.reason}")
+            # Don't retry on errors that won't resolve by waiting
+            if "does not exist" in error_body or "not found" in error_body:
+                break
             continue
         except (urllib.error.URLError, OSError) as exc:
             last_exc = exc
@@ -1347,7 +1350,7 @@ def main():
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")
     parser.add_argument("--cleanup", action="store_true", help="Apply deterministic cleanup (normalize units, dedupe, tidy steps)")
     parser.add_argument("--use-local", action="store_true", help="Use a local Ollama model instead of OpenAI for recipe extraction")
-    parser.add_argument("--local-model", default="llama3.1:8b-instruct", help="Ollama model name (default: llama3.1:8b-instruct)")
+    parser.add_argument("--local-model", default="llama3.1:8b", help="Ollama model name (default: llama3.1:8b)")
     parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model name (default: gpt-4o-mini)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
