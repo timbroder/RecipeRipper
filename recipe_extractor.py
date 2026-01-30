@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -19,6 +21,12 @@ from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
+VERBOSE = False
+
+def vlog(msg: str) -> None:
+    """Log a message only when verbose mode is enabled."""
+    if VERBOSE:
+        console.log(msg)
 
 # -----------------------------
 # Models / Schemas
@@ -204,7 +212,7 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
         return []
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(seconds_between * fps))
-    ocr = PaddleOCR(use_angle_cls=True, lang="en")
+    ocr = PaddleOCR(use_textline_orientation=True, lang="en")
     idx = 0
     hits: List[str] = []
     frames_sampled = 0
@@ -216,15 +224,14 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
             ok, frame = cap.retrieve()
             if not ok:
                 break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            h, w = gray.shape
+            h, w = frame.shape[:2]
             scale = OCR_UPSCALE_FACTOR if max(h, w) < OCR_SCALE_THRESHOLD else 1.0
             if scale != 1.0:
-                gray = cv2.resize(gray, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
-            res = ocr.ocr(gray, cls=True)
-            if res and res[0]:
-                for line in res[0]:
-                    txt = line[1][0].strip()
+                frame = cv2.resize(frame, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
+            res = ocr.predict(frame)
+            if res and len(res) > 0 and 'rec_texts' in res[0]:
+                for txt in res[0]['rec_texts']:
+                    txt = txt.strip()
                     if txt and len(txt) >= 2:
                         hits.append(txt)
             frames_sampled += 1
@@ -242,21 +249,286 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
     return uniq
 
 # -----------------------------
+# LLM backend helpers
+# -----------------------------
+
+def ensure_local_model(model: str) -> None:
+    """Check if an Ollama model is available locally; pull it if not."""
+    url = "http://localhost:11434/api/tags"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        names = [m.get("name", "") for m in data.get("models", [])]
+        # Check both exact match and match without tag
+        if model in names or any(n.split(":")[0] == model.split(":")[0] for n in names):
+            return
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        console.print("[red]Cannot reach Ollama at localhost:11434. Is it running?")
+        sys.exit(1)
+
+    console.print(f"[yellow]Pulling Ollama model '{model}' …")
+    pull_url = "http://localhost:11434/api/pull"
+    body = json.dumps({"name": model, "stream": False}).encode()
+    req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            resp.read()
+    except (urllib.error.URLError, OSError) as exc:
+        console.print(f"[red]Failed to pull model '{model}': {exc}")
+        sys.exit(1)
+
+
+def ask_local_model(prompt: str, model: str) -> str:
+    """Send a prompt to Ollama and return the response text."""
+    url = "http://localhost:11434/api/generate"
+    body = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read().decode())
+    return data.get("response", "")
+
+
+def ask_openai(prompt: str, model: str) -> str:
+    """Send a prompt to OpenAI and return the response text."""
+    import openai
+    client = openai.OpenAI()
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    return resp.choices[0].message.content or ""
+
+
+def llm_extract_recipe(
+    description: str,
+    transcript: str,
+    ocr_lines: List[str],
+    use_local: bool,
+    model: str,
+) -> Tuple[List[str], List[str]]:
+    """Use an LLM to extract ingredients and directions from raw text sources."""
+    filtered_ocr = [ln for ln in ocr_lines if not is_noise(ln)]
+
+    parts = []
+    if transcript:
+        parts.append(f"## Transcript\n{transcript}")
+    if description:
+        parts.append(f"## Video Description\n{description}")
+    if filtered_ocr:
+        parts.append(f"## On-Screen Text (OCR)\n" + "\n".join(filtered_ocr))
+
+    raw_text = "\n\n".join(parts) if parts else "(no text available)"
+
+    prompt = (
+        "You are a recipe extraction assistant. Given the following raw text from a recipe video, "
+        "extract the actual recipe ingredients (with quantities when available) and cooking directions.\n\n"
+        "Rules:\n"
+        "- Return ONLY a JSON object with two keys: \"ingredients\" and \"directions\"\n"
+        "- \"ingredients\" is a list of strings, each a single ingredient with quantity and unit "
+        "(e.g. \"1 cup flour\", \"2 cloves garlic, minced\")\n"
+        "- \"directions\" is a list of strings, each a single cooking step in imperative form "
+        "(e.g. \"Sauté the onion until translucent\", \"Preheat oven to 350°F\")\n"
+        "- Ignore commentary, opinions, nutrition info, and non-recipe content\n"
+        "- Do NOT wrap the JSON in markdown code fences\n\n"
+        f"Raw text:\n{raw_text}\n\n"
+        "JSON:"
+    )
+
+    if use_local:
+        ensure_local_model(model)
+        raw = ask_local_model(prompt, model)
+    else:
+        raw = ask_openai(prompt, model)
+
+    # Parse JSON from response — handle markdown fences if present
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```\s*$", "", raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Try to find JSON object in the response
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            data = json.loads(m.group())
+        else:
+            console.print("[yellow]LLM did not return valid JSON; falling back to heuristic parsing.")
+            return combine_sources(description, transcript, ocr_lines)
+
+    ing_lines = data.get("ingredients", [])
+    dir_lines = data.get("directions", [])
+    return ing_lines, dir_lines
+
+
+def llm_extract_from_description(
+    description: str,
+    use_local: bool,
+    model: str,
+) -> Optional[Tuple[List[str], List[str]]]:
+    """Try to extract a complete recipe from just the video description.
+
+    Returns (ingredients, directions) if the description yields at least
+    2 ingredients AND 1 direction.  Returns None otherwise (including when
+    the description is empty/whitespace), so the caller can fall back to
+    the full transcription + OCR pipeline.
+    """
+    if not description or not description.strip():
+        return None
+
+    prompt = (
+        "You are a recipe extraction assistant. Given the following video description, "
+        "extract the actual recipe ingredients (with quantities when available) and cooking directions.\n\n"
+        "Rules:\n"
+        "- Return ONLY a JSON object with two keys: \"ingredients\" and \"directions\"\n"
+        "- \"ingredients\" is a list of strings, each a single ingredient with quantity and unit "
+        "(e.g. \"1 cup flour\", \"2 cloves garlic, minced\")\n"
+        "- \"directions\" is a list of strings, each a single cooking step in imperative form "
+        "(e.g. \"Sauté the onion until translucent\", \"Preheat oven to 350°F\")\n"
+        "- Ignore commentary, opinions, nutrition info, and non-recipe content\n"
+        "- Do NOT wrap the JSON in markdown code fences\n\n"
+        f"Video description:\n{description}\n\n"
+        "JSON:"
+    )
+
+    if use_local:
+        ensure_local_model(model)
+        raw = ask_local_model(prompt, model)
+    else:
+        raw = ask_openai(prompt, model)
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```\s*$", "", raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                data = json.loads(m.group())
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+
+    ing_lines = data.get("ingredients", [])
+    dir_lines = data.get("directions", [])
+
+    if len(ing_lines) >= 2 and len(dir_lines) >= 1:
+        return ing_lines, dir_lines
+    return None
+
+
+# -----------------------------
 # Parsing heuristics
 # -----------------------------
+
+# Common food words for ingredient detection
+FOOD_WORDS = [
+    "salt", "pepper", "oil", "flour", "sugar", "butter", "garlic", "onion", "egg", "eggs",
+    "milk", "water", "cream", "cheese", "chicken", "beef", "pork", "fish", "salmon", "shrimp",
+    "tomato", "tomatoes", "potato", "potatoes", "carrot", "carrots", "celery", "broccoli",
+    "spinach", "lettuce", "cucumber", "beans", "lentils", "rice", "pasta", "noodles",
+    "bread", "lemon", "lime", "orange", "apple", "banana", "vinegar", "soy sauce",
+    "olive oil", "vegetable oil", "coconut oil", "sesame oil", "broth", "stock",
+    "wine", "beer", "honey", "maple syrup", "vanilla", "cinnamon", "cumin", "paprika",
+    "oregano", "basil", "thyme", "rosemary", "parsley", "cilantro", "ginger", "turmeric",
+    "nuts", "almonds", "walnuts", "cashews", "peanuts", "seeds", "yeast", "nutritional yeast",
+    "tofu", "tempeh", "edamame", "mushroom", "mushrooms", "zucchini", "squash", "cabbage",
+    "kale", "chard", "asparagus", "corn", "peas", "green beans", "cauliflower"
+]
+
+# Patterns that indicate YouTube UI noise or non-recipe content
+NOISE_PATTERNS = [
+    r"^@\w+",  # @username mentions
+    r"^reply\b",  # Reply buttons
+    r"^reply with video",
+    r"^reply to\b",
+    r"^\d+%$",  # Just percentages
+    r"^%\s*\w+",  # % Daily Value etc
+    r"^\d+[mg]?$",  # Just numbers or measurements without context
+    r"^(total|saturated)\s*(fat|carb|sugar)",  # Nutrition label
+    r"^cholesterol",
+    r"^calcium",
+    r"^calories",
+    r"^serving size",
+    r"^servings per",
+    r"^daily value",
+    r"^\d+\s*large\s*servings?$",
+    r"^per serv",
+    r"^amount",
+    r"^incl\.\s*added",
+    r"^made in a.*facility",
+    r"^organic\s+\w+\s+beans?$",  # Product labels without quantity
+    r"^ingredients?:?$",
+    r"\.jpgs?$",  # Image filenames
+    r"^i'm\s+\d+\s+years?\s+old",
+    r"^every\s+meal",
+    r"^matters\.?$",
+    r"^(and|the|a|an|or|but|so|if|when|then|that|this|it|i|you|we|they|he|she)\s*$",  # Single common words
+]
+
+def is_noise(line: str) -> bool:
+    """Check if a line is YouTube UI noise or non-recipe content."""
+    line_s = line.strip().lower()
+    if not line_s or len(line_s) < 3:
+        return True
+    # Check noise patterns
+    for pattern in NOISE_PATTERNS:
+        if re.search(pattern, line_s, re.I):
+            return True
+    # Filter lines that are just usernames or hashtags
+    if line_s.startswith(('#', '@')):
+        return True
+    # Filter lines that look like nutrition facts (multiple % or g values)
+    if len(re.findall(r'\d+\s*[%g]', line_s)) > 2:
+        return True
+    # Filter lines that are just ALL CAPS short phrases without food words
+    if line.strip().isupper() and len(line.strip().split()) <= 4:
+        if not any(food in line_s for food in FOOD_WORDS):
+            return True
+    # Filter OCR artifacts (no spaces in long words, likely misread)
+    if len(line_s) > 10 and ' ' not in line_s and not re.match(r'^[\w-]+$', line_s):
+        return True
+    # Filter lines that look like recipe titles (cheesy cream of X pasta)
+    if re.search(r'^(cheesy|creamy|spicy|easy|quick|simple|healthy)\s+\w+\s+(of|with)\s+\w+', line_s):
+        return True
+    # Filter "I've got the X" type OCR fragments
+    if re.search(r"^i'?v?e?\s*got\s*(the|a)?\s*\w+$", line_s):
+        return True
+    # Filter run-together OCR text
+    words = line.strip().split()
+    if len(words) == 1 and len(line_s) > 12:
+        # Single "word" that's too long - likely OCR error
+        return True
+    return False
 
 def looks_like_ingredient(line: str) -> bool:
     line_s = line.strip()
     if not line_s:
         return False
-    if re.search(BULLET_PATTERN, line_s):
-        return True
+    # Filter out noise first
+    if is_noise(line_s):
+        return False
+    line_lower = line_s.lower()
+    # Must have a quantity pattern with a food word nearby
     if re.search(QTY_PATTERN, line_s, flags=re.I):
-        return True
-    if re.search(UNITS_PATTERN, line_s, flags=re.I) and re.search(r"[A-Za-z]", line_s):
-        return True
-    if any(w in line_s.lower() for w in ["salt","pepper","oil","flour","sugar","butter","garlic","onion","egg","milk","water"]):
-        return True
+        if any(food in line_lower for food in FOOD_WORDS):
+            return True
+    # Bullet point with food word
+    if re.search(BULLET_PATTERN, line_s):
+        if any(food in line_lower for food in FOOD_WORDS):
+            return True
+    # Has unit and food word
+    if re.search(UNITS_PATTERN, line_s, flags=re.I):
+        if any(food in line_lower for food in FOOD_WORDS):
+            return True
     return False
 
 def parse_ingredient(line: str) -> Ingredient:
@@ -281,16 +553,48 @@ def looks_like_direction(line: str) -> bool:
     ls = line.strip()
     if not ls:
         return False
+    # Filter out noise
+    if is_noise(ls):
+        return False
+    # Allow shorter lines if they start with an imperative verb
+    starts_with_imperative = IMPERATIVE_RE.search(ls)
+    # Filter out very short lines unless they start with imperative
+    if len(ls.split()) < 3 and not starts_with_imperative:
+        return False
+    # Must be a reasonable length for a direction (unless imperative)
+    if len(ls) < 10 and not starts_with_imperative:
+        return False
+    ls_lower = ls.lower()
+    # Check for imperative cooking verbs at start
     if IMPERATIVE_RE.search(ls):
         return True
+    # Temperature or time references in context
     if TEMP_RE.search(ls) or TIME_RE.search(ls):
         return True
-    if re.match(r"^\s*\d+[)\.\s-]+", ls):
+    # Numbered steps
+    if re.match(r"^\s*\d+[)\.\s-]+\s*\w", ls):
         return True
     if re.search(r"\bstep\s*\d+\b", ls, flags=re.I):
         return True
-    verbs = ["cook","bake","simmer","saute","sauté","grill","roast","mix","stir","whisk","boil","fry","blend","fold"]
-    if any(re.search(rf"\b{v}\b", ls, flags=re.I) for v in verbs):
+    # Cooking action verbs with context (not just the word alone)
+    cooking_verbs = [
+        "cook", "bake", "simmer", "saute", "sauté", "grill", "roast", "mix", "stir",
+        "whisk", "boil", "fry", "blend", "fold", "add", "pour", "combine", "place",
+        "put", "set", "let", "allow", "wait", "remove", "take", "transfer", "serve",
+        "garnish", "top", "sprinkle", "drizzle", "toss", "coat", "cover", "wrap"
+    ]
+    # Look for patterns like "add the X", "blend until", "cook for", etc.
+    for verb in cooking_verbs:
+        if re.search(rf"\b{verb}\s+(the|a|an|some|it|them|until|for|to|in|on|into|with)\b", ls_lower):
+            return True
+        # Also match "I'm gonna add", "just add", "then add", etc.
+        if re.search(rf"\b(gonna|going to|just|then|now|first|next)\s+{verb}\b", ls_lower):
+            return True
+        # Match "I've got the X sauteing" or "get them all in"
+        if re.search(rf"\b{verb}(s|ed|ing)?\s+(the|a|them|it|all|everything)\b", ls_lower):
+            return True
+    # Match "I've got the X cooking/sauteing" patterns
+    if re.search(r"\b(i've got|got)\s+the\s+\w+.*\b(sauteing|cooking|boiling|simmering|frying|baking)\b", ls_lower):
         return True
     return False
 
@@ -305,33 +609,224 @@ def split_lines_to_sections(lines: List[str]) -> Tuple[List[str], List[str], Lis
             other.append(ln)
     return ing_lines, dir_lines, other
 
-def combine_sources(description: str, transcript: str, ocr_lines: List[str]) -> Tuple[List[str], List[str]]:
-    text_candidates: List[str] = []
-    for blob in [description or "", transcript or ""]:
-        for raw in re.split(r"[\n\r]+", blob):
+def extract_ingredients_from_sentence(sentence: str) -> List[str]:
+    """Extract all ingredient mentions from a transcript sentence like 'add a can of beans'."""
+    s = sentence.lower()
+    extracted = []
+    seen_in_sentence = set()
+
+    # Patterns for extracting ingredients from speech
+    patterns = [
+        # "add a/an/the X of Y" or "add X Y"
+        r"(?:add|put|use|need|got|have|using)\s+(?:a|an|the|some)?\s*(\d*\s*(?:can|cup|tablespoon|teaspoon|tbsp|tsp|pound|lb|ounce|oz|head|bunch|clove|half|quarter)s?\s+(?:of\s+)?[\w\s]+?)(?:\.|,|$|and\b|then\b)",
+        # "half a cup of X", "quarter cup of X", "quarter of a cup of X"
+        r"((?:half|quarter)\s+(?:a\s+)?(?:of\s+a\s+)?(?:cup|teaspoon|tablespoon)\s+(?:of\s+)?[\w\s]+?)(?:\.|,|$|and\b)",
+        # "X cups of Y", "X tablespoons Y"
+        r"(\d+(?:/\d+)?\s*(?:cup|tablespoon|teaspoon|tbsp|tsp|pound|lb|ounce|oz|can|head|clove)s?\s+(?:of\s+)?[\w\s]+?)(?:\.|,|$|and\b)",
+        # "the juice of X lemon"
+        r"((?:the\s+)?juice\s+of\s+(?:one|two|three|a|\d+)\s+\w+)",
+        # "one cup of broth", "one lemon" - capture the whole phrase
+        r"((?:one|two|three|four|five)\s+(?:cup|tablespoon|teaspoon|can|head|clove|pound)s?\s+(?:of\s+)?[\w\s]+?)(?:\.|,|$|and\b)",
+        # Standalone "one X" for single items
+        r"(?:^|,\s*|\.\s*)((?:one|a)\s+(?:head|bunch|clove)\s+(?:of\s+)?[\w]+)",
+    ]
+
+    for pattern in patterns:
+        matches = re.finditer(pattern, s)
+        for match in matches:
+            ingredient = match.group(1).strip()
+            # Clean up the ingredient string
+            ingredient = re.sub(r"\s+", " ", ingredient)
+            ingredient = ingredient.strip("., ")
+            # Filter out non-food matches and dedup within sentence
+            key = ingredient.lower()
+            if len(ingredient) > 5 and key not in seen_in_sentence:
+                if any(food in ingredient for food in FOOD_WORDS):
+                    seen_in_sentence.add(key)
+                    extracted.append(ingredient.title())
+
+    # Also look for "salt and pepper" type mentions
+    if re.search(r"\bsalt\s+and\s+pepper\b", s) and "salt and pepper" not in seen_in_sentence:
+        extracted.append("Salt And Pepper")
+
+    return extracted
+
+def extract_all_ingredients_from_transcript(transcript: str) -> List[str]:
+    """Extract all ingredient mentions from transcript."""
+    ingredients = []
+    seen = set()
+
+    sentences = re.split(r'(?<=[.!?])\s+', transcript)
+    for sentence in sentences:
+        extracted = extract_ingredients_from_sentence(sentence)
+        for ing in extracted:
+            key = ing.lower()
+            if key not in seen:
+                seen.add(key)
+                ingredients.append(ing)
+
+    return ingredients
+
+def is_actual_direction(line: str) -> bool:
+    """Additional check to filter out non-directions that passed initial filter."""
+    ls = line.strip().lower()
+    # Filter out commentary/opinions
+    commentary_patterns = [
+        r"^(i mean|yeah,|so,|well,|okay,|oh,|wow|this is amazing|it's so)\b",
+        r"\b(i like it|i love it|i think|i hope|helps me age|so much protein)\b",
+        r"\bmacros\b",
+        r"\bprotein and fiber\b",
+        r"\bfirst time\b.*\bmix it with\b",
+        r"\bdefinitely not\b",
+        r"\bthis has so much\b",
+        r"\bif you want to make this\b",
+        r"\busing .* because i want\b",
+        r"\bthis really helps\b",
+        r"\bnutritional yeast is amazingly\b",
+        r"\bso he sautes\b",
+        r"\bsounds ideal\b",
+        r"\byou can use any\b",
+        r"\bhow long is this\b",
+        r"\bput the macros\b",
+        r"\bbeautiful and rich\b",
+        r"\blarge servings\b",
+    ]
+    for pattern in commentary_patterns:
+        if re.search(pattern, ls):
+            return False
+    return True
+
+def convert_to_direction(sentence: str) -> str:
+    """Convert a descriptive sentence to an imperative direction."""
+    s = sentence.strip()
+    # Convert "To the blender, I'm just gonna add X" -> "Add X to the blender"
+    blender_match = re.match(r"^to the (blender|pot|pan|bowl),?\s*", s, flags=re.I)
+    destination = ""
+    if blender_match:
+        destination = f" to the {blender_match.group(1).lower()}"
+        s = s[blender_match.end():]
+    # Convert "I'm gonna add X" -> "Add X"
+    s = re.sub(r"^(i'm |i am )?(just )?(gonna |going to )", "", s, flags=re.I)
+    # Convert "you're gonna wanna X" -> "X"
+    s = re.sub(r"^(you're |you are )?(gonna |going to )?(wanna |want to )?", "", s, flags=re.I)
+    # Convert "I've got the X sauteing" -> "Saute the X"
+    saute_match = re.match(r"^i'?v?e?\s*got\s+the\s+(\w+),?\s*(sauteing|cooking|frying)", s, flags=re.I)
+    if saute_match:
+        s = f"Sauté the {saute_match.group(1)}"
+    # Remove trailing "and then..."
+    s = re.sub(r",?\s*and then\.\.\.?$", "", s, flags=re.I)
+    # Capitalize first letter
+    if s:
+        s = s[0].upper() + s[1:]
+    # Add destination back
+    if destination and not s.endswith(destination):
+        s = s.rstrip('.') + destination + "."
+    return s
+
+def combine_sources(
+    description: str,
+    transcript: str,
+    ocr_lines: List[str],
+    use_local: Optional[bool] = None,
+    llm_model: Optional[str] = None,
+) -> Tuple[List[str], List[str]]:
+    # If LLM mode requested, delegate to llm_extract_recipe
+    if use_local is not None and llm_model:
+        return llm_extract_recipe(description, transcript, ocr_lines, use_local, llm_model)
+
+    # Filter OCR lines to remove noise
+    filtered_ocr = [ln for ln in ocr_lines if not is_noise(ln)]
+
+    # Split transcript into sentences
+    transcript_sentences: List[str] = []
+    if transcript:
+        for raw in re.split(r"[\n\r]+", transcript):
+            parts = re.split(r"(?<=[\.!?])\s+", raw)
+            for p in parts:
+                p = p.strip()
+                if p and len(p) > 10:
+                    transcript_sentences.append(p)
+
+    # Split description into sentences
+    desc_sentences: List[str] = []
+    if description:
+        for raw in re.split(r"[\n\r]+", description):
             parts = re.split(r"(?<=[\.!?])\s+", raw)
             for p in parts:
                 p = p.strip()
                 if p:
-                    text_candidates.append(p)
-    all_lines = ocr_lines + text_candidates
+                    desc_sentences.append(p)
+
+    # Extract ingredients from transcript
+    extracted_ingredients = extract_all_ingredients_from_transcript(transcript or "")
+
+    # Combine OCR-based ingredients with transcript-extracted ingredients
+    # Prioritize transcript extractions as they're cleaner
+    all_ing_candidates = extracted_ingredients.copy()
+
+    # Add OCR lines that look like ingredients (with food words)
+    for ln in filtered_ocr:
+        if looks_like_ingredient(ln):
+            all_ing_candidates.append(ln)
+
+    # Add description lines that look like ingredients
+    for ln in desc_sentences:
+        if looks_like_ingredient(ln):
+            all_ing_candidates.append(ln)
+
+    # Deduplicate ingredients with fuzzy matching for partial matches
     seen = set()
-    ordered = []
-    for ln in all_lines:
+    seen_foods = set()  # Track which food items we've already captured
+    ing_lines = []
+    for ln in all_ing_candidates:
         key = ln.strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            ordered.append(ln)
-    ing_lines, dir_lines, other = split_lines_to_sections(ordered)
-    if len(ing_lines) < 3:
-        for ln in other:
-            if looks_like_ingredient(ln):
-                ing_lines.append(ln)
-    if not dir_lines and transcript:
-        sentences = re.split(r"(?<=[\.!?])\s+", transcript)
-        for s in sentences:
-            if looks_like_direction(s):
-                dir_lines.append(s.strip())
+        # Normalize key for dedup
+        key_normalized = re.sub(r'[^\w\s]', '', key)  # Remove punctuation
+        key_normalized = re.sub(r'\s+', ' ', key_normalized).strip()
+        if not key_normalized:
+            continue
+        # Check if this is a subset/duplicate of existing ingredient
+        is_dup = False
+        for existing in seen:
+            # If new key is contained in existing or vice versa, it's a dup
+            if key_normalized in existing or existing in key_normalized:
+                is_dup = True
+                break
+        # Also check if main food word already captured
+        for food in FOOD_WORDS:
+            if food in key_normalized and food in seen_foods:
+                # Check if this is just a partial match (like "CUP OF BROTH" when we have "one cup of broth")
+                if len(key_normalized.split()) <= 3:
+                    is_dup = True
+                    break
+        if not is_dup and key_normalized not in seen:
+            seen.add(key_normalized)
+            # Track food words in this ingredient
+            for food in FOOD_WORDS:
+                if food in key_normalized:
+                    seen_foods.add(food)
+            ing_lines.append(ln)
+
+    # Extract directions from transcript - only actual cooking steps
+    dir_lines = []
+    seen_dirs = set()
+    for sentence in transcript_sentences:
+        if looks_like_direction(sentence) and is_actual_direction(sentence):
+            direction = convert_to_direction(sentence)
+            key = direction.lower()
+            if key not in seen_dirs:
+                seen_dirs.add(key)
+                dir_lines.append(direction)
+
+    # Also check description for directions
+    for sentence in desc_sentences:
+        if looks_like_direction(sentence) and is_actual_direction(sentence):
+            direction = convert_to_direction(sentence)
+            key = direction.lower()
+            if key not in seen_dirs:
+                seen_dirs.add(key)
+                dir_lines.append(direction)
+
     return ing_lines, dir_lines
 
 # -----------------------------
@@ -488,17 +983,48 @@ def _process_directions(dir_lines: List[str], cleanup: bool) -> List[str]:
 def process_youtube(url: str, args) -> RecipeOutput:
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
+        vlog(f"[cyan]Downloading YouTube video: {url}")
         video_path, info = download_youtube(url, tmpdir)
         if not video_path or not video_path.exists():
             console.print("[red]Download failed or no video file found.")
             sys.exit(2)
         title = info.get("title")
         description = info.get("description") or ""
-        transcript = transcribe(video_path, model_size=args.model, language=args.language)
-        ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
-        ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines)
+        vlog(f"[cyan]Title: {title}")
+        vlog(f"[cyan]Description length: {len(description)} chars")
+        use_local = getattr(args, "use_local", False)
+        llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
+        vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
+
+        # Try extracting from description alone when LLM mode is active
+        desc_result = None
+        if llm_model:
+            vlog("[cyan]Attempting description-first extraction…")
+            desc_result = llm_extract_from_description(description, use_local, llm_model)
+            if desc_result is None:
+                vlog("[yellow]Description-first extraction returned no complete recipe.")
+            else:
+                vlog(f"[green]Description-first extraction found {len(desc_result[0])} ingredients, {len(desc_result[1])} directions.")
+
+        if desc_result is not None:
+            ing_lines, dir_lines = desc_result
+            transcript = ""
+            ocr_lines: List[str] = []
+            console.log("[green]Recipe extracted from description — skipping video transcription/OCR.")
+        else:
+            vlog("[cyan]Starting transcription…")
+            transcript = transcribe(video_path, model_size=args.model, language=args.language)
+            vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
+            vlog("[cyan]Starting OCR…")
+            ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
+            vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
+            vlog("[cyan]Combining sources…")
+            ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+
+        vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
         ingredients = [parse_ingredient(l) for l in ing_lines]
         if args.cleanup:
+            vlog("[cyan]Running cleanup…")
             ingredients = clean_ingredients(ingredients)
         out = RecipeOutput(
             title=title,
@@ -516,11 +1042,22 @@ def process_local(video_file: str, args) -> RecipeOutput:
         console.print(f"[red]Video not found: {vp}")
         sys.exit(2)
     title = vp.stem
+    vlog(f"[cyan]Processing local video: {vp}")
+    vlog("[cyan]Starting transcription…")
     transcript = transcribe(vp, model_size=args.model, language=args.language)
+    vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
+    vlog("[cyan]Starting OCR…")
     ocr_lines = ocr_onscreen_text(vp, seconds_between=args.fps_sample, max_frames=args.max_frames)
-    ing_lines, dir_lines = combine_sources("", transcript, ocr_lines)
+    vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
+    use_local = getattr(args, "use_local", False)
+    llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
+    vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
+    vlog("[cyan]Combining sources…")
+    ing_lines, dir_lines = combine_sources("", transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+    vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
     ingredients = [parse_ingredient(l) for l in ing_lines]
     if args.cleanup:
+        vlog("[cyan]Running cleanup…")
         ingredients = clean_ingredients(ingredients)
     out = RecipeOutput(
         title=title,
@@ -597,9 +1134,9 @@ def preload_models(model_size: str="small", lang: str="en"):
         try:
             from paddleocr import PaddleOCR
             import numpy as _np
-            ocr = PaddleOCR(use_angle_cls=True, lang=lang)
+            ocr = PaddleOCR(use_textline_orientation=True, lang=lang)
             dummy = (_np.zeros((64, 64, 3)) * 255).astype("uint8")
-            _ = ocr.ocr(dummy, cls=True)
+            _ = ocr.predict(dummy)
             progress.update(ocr_task, description="✓ PaddleOCR cached")
             progress.stop_task(ocr_task)
         except Exception as e:
@@ -642,9 +1179,16 @@ def main():
     parser.add_argument("--max-frames", type=int, default=180, help="Max frames to OCR (default 180)")
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")
     parser.add_argument("--cleanup", action="store_true", help="Apply deterministic cleanup (normalize units, dedupe, tidy steps)")
+    parser.add_argument("--use-local", action="store_true", help="Use a local Ollama model instead of OpenAI for recipe extraction")
+    parser.add_argument("--local-model", default="llama3.1:8b-instruct", help="Ollama model name (default: llama3.1:8b-instruct)")
+    parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model name (default: gpt-4o-mini)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging of each pipeline step")
     args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     ensure_ffmpeg()
 
