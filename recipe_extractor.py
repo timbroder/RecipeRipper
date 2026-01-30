@@ -1134,9 +1134,20 @@ def process_local(video_file: str, args) -> RecipeOutput:
     )
     return out
 
+def _slugify(text: str) -> str:
+    """Turn a title into a filesystem-safe slug."""
+    s = text.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = s.strip("-")
+    return s or "recipe"
+
+
 def save_outputs(out: RecipeOutput, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "recipe.json").write_text(out.model_dump_json(indent=2, ensure_ascii=False))
+    slug = _slugify(out.title) if out.title else "recipe"
+    (outdir / f"{slug}.json").write_text(out.model_dump_json(indent=2, ensure_ascii=False))
     md = ["# Recipe Extraction"]
     if out.title:
         md.append(f"**Title:** {out.title}")
@@ -1161,7 +1172,7 @@ def save_outputs(out: RecipeOutput, outdir: Path):
         md.append("## Warnings")
         for w in out.warnings:
             md.append(f"- {w}")
-    (outdir / "recipe.md").write_text("\n".join(md))
+    (outdir / f"{slug}.md").write_text("\n".join(md))
 
 def pretty_print(out: RecipeOutput):
     table = Table(title="Extracted Recipe", box=box.SIMPLE, show_lines=False)

@@ -422,8 +422,8 @@ def test_save_outputs_and_pretty_print(tmp_path, monkeypatch):
     monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
     outdir = tmp_path / "output"
     rex.save_outputs(recipe, outdir)
-    assert (outdir / "recipe.json").exists()
-    assert (outdir / "recipe.md").exists()
+    assert (outdir / "cake.json").exists()
+    assert (outdir / "cake.md").exists()
     rex.pretty_print(recipe)
 
 
@@ -928,6 +928,41 @@ def test_process_youtube_falls_through_on_description_miss(monkeypatch, tmp_path
 
 
 # -----------------------------
+# Slug / title-based output tests
+# -----------------------------
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Simple Cake", "simple-cake"),
+        ("Best Pasta (Easy!)", "best-pasta-easy"),
+        ("  Spaced  Out  ", "spaced-out"),
+        ("Crème Brûlée", "crème-brûlée"),
+        ("", "recipe"),
+        ("---", "recipe"),
+    ],
+)
+def test_slugify(title, expected):
+    assert rex._slugify(title) == expected
+
+
+def test_save_outputs_no_title(tmp_path, monkeypatch):
+    recipe = rex.RecipeOutput(
+        ingredients=[rex.Ingredient(original="1 egg", item="egg")],
+        directions=["Boil"],
+    )
+
+    def fake_dump(self, indent=2, ensure_ascii=False):
+        return json.dumps(self.model_dump(), indent=indent)
+
+    monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
+    rex.save_outputs(recipe, tmp_path)
+    assert (tmp_path / "recipe.json").exists()
+    assert (tmp_path / "recipe.md").exists()
+
+
+# -----------------------------
 # Cross-reference check tests
 # -----------------------------
 
@@ -1046,12 +1081,12 @@ def test_save_outputs_with_warnings(tmp_path, monkeypatch):
     outdir = tmp_path / "output"
     rex.save_outputs(recipe, outdir)
 
-    md_text = (outdir / "recipe.md").read_text()
+    md_text = (outdir / "cake.md").read_text()
     assert "## Warnings" in md_text
     assert "Unused ingredient: vanilla" in md_text
     assert "Missing ingredient: butter" in md_text
 
-    json_data = json.loads((outdir / "recipe.json").read_text())
+    json_data = json.loads((outdir / "cake.json").read_text())
     assert "warnings" in json_data
     assert len(json_data["warnings"]) == 2
 
