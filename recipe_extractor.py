@@ -1010,6 +1010,13 @@ def _extract_food_words_from_text(text: str) -> set:
     for fw in FOOD_WORDS:
         if " " not in fw and _normalize_word(fw) in text_normalized:
             found.add(_normalize_word(fw))
+    # Remove single-word items that are part of a matched multi-word item
+    multi_word_foods = {_normalize_word(fw) for fw in FOOD_WORDS if " " in fw and _normalize_word(fw) in found}
+    for mw in multi_word_foods:
+        for part in mw.split():
+            normed = _normalize_word(part)
+            if normed in found and normed != mw:
+                found.discard(normed)
     return found
 
 
@@ -1032,7 +1039,8 @@ def cross_reference_check(recipe: RecipeOutput) -> List[str]:
 
     missing = directions_food - all_ingredient_food
     for word in sorted(missing):
-        warnings.append(f"Missing ingredient: {word}")
+        warnings.append(f"Missing ingredient: {word} (added to ingredients)")
+        recipe.ingredients.append(Ingredient(original=word, item=word))
 
     recipe.warnings = warnings
     return warnings
@@ -1322,7 +1330,7 @@ def main():
     saved = save_outputs(out, Path(args.outdir))
     pretty_print(out)
     if args.publish:
-        publish_gist(list(saved))
+        publish_gist([saved[1]])
 
 if __name__ == "__main__":
     main()

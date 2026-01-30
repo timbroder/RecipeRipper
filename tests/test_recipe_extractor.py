@@ -1015,8 +1015,8 @@ def test_cross_reference_missing_ingredient():
         directions=["Mix the flour with butter and eggs"],
     )
     warnings = rex.cross_reference_check(recipe)
-    assert any("butter" in w.lower() for w in warnings)
-    assert any("egg" in w.lower() for w in warnings)
+    assert any("butter" in w.lower() and "added to ingredients" in w.lower() for w in warnings)
+    assert any("egg" in w.lower() and "added to ingredients" in w.lower() for w in warnings)
 
 
 def test_cross_reference_no_warnings():
@@ -1071,7 +1071,7 @@ def test_save_outputs_with_warnings(tmp_path, monkeypatch):
         directions=["Mix"],
         extras={"ocr_samples": []},
         raw_sources={"description": "", "transcript": ""},
-        warnings=["Unused ingredient: vanilla", "Missing ingredient: butter"],
+        warnings=["Unused ingredient: vanilla", "Missing ingredient: butter (added to ingredients)"],
     )
 
     def fake_dump(self, indent=2, ensure_ascii=False):
@@ -1084,7 +1084,7 @@ def test_save_outputs_with_warnings(tmp_path, monkeypatch):
     md_text = (outdir / "cake.md").read_text()
     assert "## Warnings" in md_text
     assert "Unused ingredient: vanilla" in md_text
-    assert "Missing ingredient: butter" in md_text
+    assert "Missing ingredient: butter (added to ingredients)" in md_text
 
     json_data = json.loads((outdir / "cake.json").read_text())
     assert "warnings" in json_data
@@ -1161,4 +1161,48 @@ def test_publish_gist_gh_failure(monkeypatch, tmp_path, capsys):
     assert exc.value.code == 1
     out = capsys.readouterr().out
     assert "auth required" in out
+
+
+# -----------------------------
+# Cross-reference false-positive & promotion tests
+# -----------------------------
+
+
+def test_extract_food_words_multi_word_suppresses_single():
+    """'nutritional yeast' in text should NOT also yield standalone 'yeast'."""
+    found = rex._extract_food_words_from_text("nutritional yeast")
+    normalized_yeast = rex._normalize_word("yeast")
+    normalized_nutritional_yeast = rex._normalize_word("nutritional yeast")
+    assert normalized_nutritional_yeast in found
+    assert normalized_yeast not in found
+
+
+def test_cross_reference_no_false_positive_subword():
+    """When both ingredient list and directions mention 'nutritional yeast',
+    there should be no 'Missing ingredient: yeast' warning."""
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="2 tbsp nutritional yeast", item="nutritional yeast"),
+        ],
+        directions=["Sprinkle nutritional yeast on top"],
+    )
+    warnings = rex.cross_reference_check(recipe)
+    missing = [w for w in warnings if "Missing" in w]
+    assert not any("yeast" in w.lower() for w in missing)
+
+
+def test_cross_reference_promotes_missing_ingredients():
+    """Missing food words found in directions should be added to recipe.ingredients."""
+    recipe = rex.RecipeOutput(
+        ingredients=[
+            rex.Ingredient(original="1 cup flour", item="flour"),
+        ],
+        directions=["Mix the flour with butter"],
+    )
+    original_count = len(recipe.ingredients)
+    warnings = rex.cross_reference_check(recipe)
+    assert any("butter" in w.lower() for w in warnings)
+    assert len(recipe.ingredients) > original_count
+    added_items = [ing.item for ing in recipe.ingredients[original_count:]]
+    assert "butter" in added_items
 
