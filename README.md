@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/timbroder/RecipeRipper/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/timbroder/RecipeRipper/actions/workflows/tests.yml)
 
-Extract structured **ingredients** and **directions** from a recipe video — works with a **YouTube URL** (incl. Shorts) or a **local file**.
+Extract structured **ingredients** and **directions** from a recipe video. It reads the video description, listens to the speech, and watches for on-screen text — combining all three sources for the best results. Works with **YouTube** (incl. Shorts), **Instagram Reels**, **TikTok**, or a **local file**.
 
 ## How it works
 
