@@ -768,6 +768,50 @@ def test_ensure_local_model_pull_needed(monkeypatch):
     assert call_count["n"] == 2  # tags + pull
 
 
+def test_ensure_local_model_pull_retry_on_500(monkeypatch):
+    """Test that pull retries on transient HTTP 500 errors."""
+    call_count = {"n": 0}
+
+    class FakeTagsResponse:
+        def read(self):
+            return json.dumps({"models": []}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    class FakePullResponse:
+        def read(self):
+            return b'{"status":"success"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        call_count["n"] += 1
+        url = req.full_url if hasattr(req, "full_url") else req
+        if "tags" in url:
+            return FakeTagsResponse()
+        # First pull attempt fails with 500
+        if call_count["n"] == 2:
+            raise urllib.error.HTTPError(url, 500, "Internal Server Error", {}, None)
+        return FakePullResponse()
+
+    import urllib.error
+
+    monkeypatch.setattr(rex.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(rex.time, "sleep", lambda s: None)
+
+    rex.ensure_local_model("llama3.1:8b-instruct")
+    # tags + pull (fail) + pull (success) = 3
+    assert call_count["n"] == 3
+
+
 def test_ensure_local_model_auto_start(monkeypatch):
     """Test that ensure_local_model auto-starts Ollama when it's not running."""
     call_count = {"urlopen": 0}

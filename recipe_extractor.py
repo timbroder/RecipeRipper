@@ -302,14 +302,22 @@ def ensure_local_model(model: str) -> None:
 
     console.print(f"[yellow]Pulling Ollama model '{model}' …")
     pull_url = "http://localhost:11434/api/pull"
-    body = json.dumps({"name": model, "stream": False}).encode()
-    req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            resp.read()
-    except (urllib.error.URLError, OSError) as exc:
-        console.print(f"[red]Failed to pull model '{model}': {exc}")
-        sys.exit(1)
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        if attempt > 0:
+            time.sleep(2)
+            console.print(f"[yellow]Retrying pull (attempt {attempt + 1}/3)…")
+        body = json.dumps({"name": model, "stream": False}).encode()
+        req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                resp.read()
+            return
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+            continue
+    console.print(f"[red]Failed to pull model '{model}': {last_exc}")
+    sys.exit(1)
 
 
 def ask_local_model(prompt: str, model: str) -> str:
