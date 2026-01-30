@@ -49,6 +49,9 @@ python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cl
 
 # Verbose output — logs each pipeline step
 python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup --verbose
+
+# Publish output to a public GitHub Gist (requires gh CLI)
+python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cleanup --publish
 ```
 
 ### CLI reference
@@ -69,6 +72,7 @@ python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cl
 | `--preload-models` | flag | off | Download/cache ASR and OCR models for offline use |
 | `--list-models` | flag | off | Show recommended faster-whisper sizes and resource needs |
 | `--verbose` | flag | off | Log each pipeline step to the console |
+| `--publish` | flag | off | Upload output to a public GitHub Gist (requires `gh` CLI) |
 
 ## LLM extraction
 
