@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from fractions import Fraction
@@ -268,8 +269,36 @@ def ensure_local_model(model: str) -> None:
         if model in names or any(n.split(":")[0] == model.split(":")[0] for n in names):
             return
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
-        console.print("[red]Cannot reach Ollama at localhost:11434. Is it running?")
-        sys.exit(1)
+        ollama_path = shutil.which("ollama")
+        if not ollama_path:
+            console.print("[red]Ollama is not installed. Get it from https://ollama.com")
+            sys.exit(1)
+
+        console.print("[yellow]Ollama is not running. Starting it automatically…")
+        subprocess.Popen(
+            [ollama_path, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        data = None
+        for _ in range(30):
+            time.sleep(1)
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                break
+            except (urllib.error.URLError, OSError, json.JSONDecodeError):
+                continue
+
+        if data is None:
+            console.print("[red]Failed to start Ollama after 30 attempts.")
+            sys.exit(1)
+
+        names = [m.get("name", "") for m in data.get("models", [])]
+        if model in names or any(n.split(":")[0] == model.split(":")[0] for n in names):
+            return
 
     console.print(f"[yellow]Pulling Ollama model '{model}' …")
     pull_url = "http://localhost:11434/api/pull"
