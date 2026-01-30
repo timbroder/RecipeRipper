@@ -543,7 +543,7 @@ def test_main_youtube_flow(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(rex, "process_youtube", lambda url, args: dummy_recipe)
-    monkeypatch.setattr(rex, "save_outputs", lambda out, od: None)
+    monkeypatch.setattr(rex, "save_outputs", lambda out, od: (Path("/fake/recipe.json"), Path("/fake/recipe.md")))
     monkeypatch.setattr(rex, "pretty_print", lambda out: None)
     rex.main()
 
@@ -559,7 +559,7 @@ def test_main_local_flow(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(rex, "process_local", lambda path, args: dummy_recipe)
-    monkeypatch.setattr(rex, "save_outputs", lambda out, od: None)
+    monkeypatch.setattr(rex, "save_outputs", lambda out, od: (Path("/fake/recipe.json"), Path("/fake/recipe.md")))
     monkeypatch.setattr(rex, "pretty_print", lambda out: None)
     rex.main()
 
@@ -1089,4 +1089,76 @@ def test_save_outputs_with_warnings(tmp_path, monkeypatch):
     json_data = json.loads((outdir / "cake.json").read_text())
     assert "warnings" in json_data
     assert len(json_data["warnings"]) == 2
+
+
+# -----------------------------
+# save_outputs return value tests
+# -----------------------------
+
+
+def test_save_outputs_returns_paths(tmp_path, monkeypatch):
+    recipe = rex.RecipeOutput(
+        title="Pasta",
+        ingredients=[rex.Ingredient(original="1 cup flour", item="flour")],
+        directions=["Boil water"],
+    )
+
+    def fake_dump(self, indent=2, ensure_ascii=False):
+        return json.dumps(self.model_dump(), indent=indent)
+
+    monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
+    json_path, md_path = rex.save_outputs(recipe, tmp_path)
+    assert json_path == tmp_path / "pasta.json"
+    assert md_path == tmp_path / "pasta.md"
+    assert json_path.exists()
+    assert md_path.exists()
+
+
+# -----------------------------
+# publish_gist tests
+# -----------------------------
+
+
+def test_publish_gist_success(monkeypatch, tmp_path, capsys):
+    f1 = tmp_path / "recipe.json"
+    f2 = tmp_path / "recipe.md"
+    f1.write_text("{}")
+    f2.write_text("# Recipe")
+
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="https://gist.github.com/abc123\n", stderr="")
+
+    monkeypatch.setattr(rex.subprocess, "run", fake_run)
+    monkeypatch.setattr(rex.shutil, "which", lambda name: "/usr/bin/gh")
+
+    rex.publish_gist([f1, f2])
+
+    assert captured["cmd"] == ["gh", "gist", "create", "--public", str(f1), str(f2)]
+    out = capsys.readouterr().out
+    assert "https://gist.github.com/abc123" in out
+
+
+def test_publish_gist_gh_missing(monkeypatch):
+    monkeypatch.setattr(rex.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit) as exc:
+        rex.publish_gist([Path("/fake/file.json")])
+    assert exc.value.code == 1
+
+
+def test_publish_gist_gh_failure(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(rex.shutil, "which", lambda name: "/usr/bin/gh")
+
+    def fake_run(cmd, capture_output, text):
+        return SimpleNamespace(returncode=1, stdout="", stderr="auth required")
+
+    monkeypatch.setattr(rex.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        rex.publish_gist([tmp_path / "recipe.json"])
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "auth required" in out
 
