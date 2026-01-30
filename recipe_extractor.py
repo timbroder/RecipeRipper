@@ -304,6 +304,7 @@ def ensure_local_model(model: str) -> None:
     pull_url = "http://localhost:11434/api/pull"
     max_pull_attempts = 5
     last_exc: Optional[Exception] = None
+    last_detail = ""
     for attempt in range(max_pull_attempts):
         if attempt > 0:
             delay = min(2 ** attempt, 16)  # 2, 4, 8, 16
@@ -315,10 +316,23 @@ def ensure_local_model(model: str) -> None:
             with urllib.request.urlopen(req, timeout=600) as resp:
                 resp.read()
             return
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode()
+            except Exception:
+                pass
+            last_exc = exc
+            last_detail = error_body
+            console.print(f"[dim]Pull returned HTTP {exc.code}: {error_body or exc.reason}")
+            continue
         except (urllib.error.URLError, OSError) as exc:
             last_exc = exc
+            last_detail = str(exc)
             continue
     console.print(f"[red]Failed to pull model '{model}': {last_exc}")
+    if last_detail:
+        console.print(f"[red]Detail: {last_detail}")
     sys.exit(1)
 
 
