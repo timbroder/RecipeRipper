@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from fractions import Fraction
@@ -50,6 +51,7 @@ class RecipeOutput(BaseModel):
     extras: Dict[str, List[str]] = Field(default_factory=dict)
     raw_sources: Dict[str, str] = Field(default_factory=dict)  # transcript, description
     warnings: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
 
 # -----------------------------
 # Utilities
@@ -268,19 +270,74 @@ def ensure_local_model(model: str) -> None:
         if model in names or any(n.split(":")[0] == model.split(":")[0] for n in names):
             return
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
-        console.print("[red]Cannot reach Ollama at localhost:11434. Is it running?")
-        sys.exit(1)
+        ollama_path = shutil.which("ollama")
+        if not ollama_path:
+            console.print("[red]Ollama is not installed. Get it from https://ollama.com")
+            sys.exit(1)
+
+        console.print("[yellow]Ollama is not running. Starting it automatically…")
+        subprocess.Popen(
+            [ollama_path, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        data = None
+        for _ in range(30):
+            time.sleep(1)
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                break
+            except (urllib.error.URLError, OSError, json.JSONDecodeError):
+                continue
+
+        if data is None:
+            console.print("[red]Failed to start Ollama after 30 attempts.")
+            sys.exit(1)
+
+        names = [m.get("name", "") for m in data.get("models", [])]
+        if model in names or any(n.split(":")[0] == model.split(":")[0] for n in names):
+            return
 
     console.print(f"[yellow]Pulling Ollama model '{model}' …")
     pull_url = "http://localhost:11434/api/pull"
-    body = json.dumps({"name": model, "stream": False}).encode()
-    req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            resp.read()
-    except (urllib.error.URLError, OSError) as exc:
-        console.print(f"[red]Failed to pull model '{model}': {exc}")
-        sys.exit(1)
+    max_pull_attempts = 5
+    last_exc: Optional[Exception] = None
+    last_detail = ""
+    for attempt in range(max_pull_attempts):
+        if attempt > 0:
+            delay = min(2 ** attempt, 16)  # 2, 4, 8, 16
+            console.print(f"[yellow]Retrying pull in {delay}s (attempt {attempt + 1}/{max_pull_attempts})…")
+            time.sleep(delay)
+        body = json.dumps({"name": model, "stream": False}).encode()
+        req = urllib.request.Request(pull_url, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                resp.read()
+            return
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode()
+            except Exception:
+                pass
+            last_exc = exc
+            last_detail = error_body
+            console.print(f"[dim]Pull returned HTTP {exc.code}: {error_body or exc.reason}")
+            # Don't retry on errors that won't resolve by waiting
+            if "does not exist" in error_body or "not found" in error_body:
+                break
+            continue
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+            last_detail = str(exc)
+            continue
+    console.print(f"[red]Failed to pull model '{model}': {last_exc}")
+    if last_detail:
+        console.print(f"[red]Detail: {last_detail}")
+    sys.exit(1)
 
 
 def ask_local_model(prompt: str, model: str) -> str:
@@ -1109,6 +1166,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
             directions=_process_directions(dir_lines, args.cleanup),
             extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
             raw_sources={"description": description[:DESC_TRUNCATE_LIMIT], "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
+            model=llm_model,
         )
         return out
 
@@ -1142,6 +1200,7 @@ def process_local(video_file: str, args) -> RecipeOutput:
         directions=_process_directions(dir_lines, args.cleanup),
         extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
         raw_sources={"description": "", "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
+        model=llm_model,
     )
     return out
 
@@ -1185,6 +1244,10 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
         md.append("## Warnings")
         for w in out.warnings:
             md.append(f"- {w}")
+    if out.model:
+        md.append("")
+        md.append("---")
+        md.append(f"*Processed with {out.model}*")
     md_path.write_text("\n".join(md))
     return json_path, md_path
 
@@ -1294,7 +1357,7 @@ def main():
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")
     parser.add_argument("--cleanup", action="store_true", help="Apply deterministic cleanup (normalize units, dedupe, tidy steps)")
     parser.add_argument("--use-local", action="store_true", help="Use a local Ollama model instead of OpenAI for recipe extraction")
-    parser.add_argument("--local-model", default="llama3.1:8b-instruct", help="Ollama model name (default: llama3.1:8b-instruct)")
+    parser.add_argument("--local-model", default="qwen3:8b", help="Ollama model name (default: qwen3:8b)")
     parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model name (default: gpt-4o-mini)")
     parser.add_argument("--preload-models", action="store_true", help="Download/cache ASR & OCR models now (offline-ready)")
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
