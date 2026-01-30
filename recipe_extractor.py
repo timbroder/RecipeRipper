@@ -51,6 +51,7 @@ class RecipeOutput(BaseModel):
     extras: Dict[str, List[str]] = Field(default_factory=dict)
     raw_sources: Dict[str, str] = Field(default_factory=dict)  # transcript, description
     warnings: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
 
 # -----------------------------
 # Utilities
@@ -1165,6 +1166,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
             directions=_process_directions(dir_lines, args.cleanup),
             extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
             raw_sources={"description": description[:DESC_TRUNCATE_LIMIT], "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
+            model=llm_model,
         )
         return out
 
@@ -1198,6 +1200,7 @@ def process_local(video_file: str, args) -> RecipeOutput:
         directions=_process_directions(dir_lines, args.cleanup),
         extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
         raw_sources={"description": "", "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
+        model=llm_model,
     )
     return out
 
@@ -1241,6 +1244,10 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
         md.append("## Warnings")
         for w in out.warnings:
             md.append(f"- {w}")
+    if out.model:
+        md.append("")
+        md.append("---")
+        md.append(f"*Processed with {out.model}*")
     md_path.write_text("\n".join(md))
     return json_path, md_path
 
