@@ -358,6 +358,67 @@ def llm_extract_recipe(
     return ing_lines, dir_lines
 
 
+def llm_extract_from_description(
+    description: str,
+    use_local: bool,
+    model: str,
+) -> Optional[Tuple[List[str], List[str]]]:
+    """Try to extract a complete recipe from just the video description.
+
+    Returns (ingredients, directions) if the description yields at least
+    2 ingredients AND 1 direction.  Returns None otherwise (including when
+    the description is empty/whitespace), so the caller can fall back to
+    the full transcription + OCR pipeline.
+    """
+    if not description or not description.strip():
+        return None
+
+    prompt = (
+        "You are a recipe extraction assistant. Given the following video description, "
+        "extract the actual recipe ingredients (with quantities when available) and cooking directions.\n\n"
+        "Rules:\n"
+        "- Return ONLY a JSON object with two keys: \"ingredients\" and \"directions\"\n"
+        "- \"ingredients\" is a list of strings, each a single ingredient with quantity and unit "
+        "(e.g. \"1 cup flour\", \"2 cloves garlic, minced\")\n"
+        "- \"directions\" is a list of strings, each a single cooking step in imperative form "
+        "(e.g. \"Sauté the onion until translucent\", \"Preheat oven to 350°F\")\n"
+        "- Ignore commentary, opinions, nutrition info, and non-recipe content\n"
+        "- Do NOT wrap the JSON in markdown code fences\n\n"
+        f"Video description:\n{description}\n\n"
+        "JSON:"
+    )
+
+    if use_local:
+        ensure_local_model(model)
+        raw = ask_local_model(prompt, model)
+    else:
+        raw = ask_openai(prompt, model)
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```\s*$", "", raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                data = json.loads(m.group())
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+
+    ing_lines = data.get("ingredients", [])
+    dir_lines = data.get("directions", [])
+
+    if len(ing_lines) >= 2 and len(dir_lines) >= 1:
+        return ing_lines, dir_lines
+    return None
+
+
 # -----------------------------
 # Parsing heuristics
 # -----------------------------
@@ -922,11 +983,24 @@ def process_youtube(url: str, args) -> RecipeOutput:
             sys.exit(2)
         title = info.get("title")
         description = info.get("description") or ""
-        transcript = transcribe(video_path, model_size=args.model, language=args.language)
-        ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
         use_local = getattr(args, "use_local", False)
         llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
-        ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+
+        # Try extracting from description alone when LLM mode is active
+        desc_result = None
+        if llm_model:
+            desc_result = llm_extract_from_description(description, use_local, llm_model)
+
+        if desc_result is not None:
+            ing_lines, dir_lines = desc_result
+            transcript = ""
+            ocr_lines: List[str] = []
+            console.log("[green]Recipe extracted from description — skipping video transcription/OCR.")
+        else:
+            transcript = transcribe(video_path, model_size=args.model, language=args.language)
+            ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
+            ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+
         ingredients = [parse_ingredient(l) for l in ing_lines]
         if args.cleanup:
             ingredients = clean_ingredients(ingredients)

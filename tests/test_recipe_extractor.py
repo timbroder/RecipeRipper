@@ -352,6 +352,7 @@ def test_process_youtube(monkeypatch, tmp_path):
     dummy_video.write_bytes(b"vid")
 
     monkeypatch.setattr(rex, "download_youtube", lambda url, td: (dummy_video, {"title": "Title", "description": "Desc"}))
+    monkeypatch.setattr(rex, "llm_extract_from_description", lambda *a, **k: None)
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Mix well")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 cup sugar"])
     monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
@@ -795,4 +796,131 @@ def test_combine_sources_without_llm():
     # just verify it returns the right shape)
     assert isinstance(ing, list)
     assert isinstance(dirs, list)
+
+
+# -----------------------------
+# Description-first extraction tests
+# -----------------------------
+
+
+def test_llm_extract_from_description_success(monkeypatch):
+    """Complete recipe from description returns (ingredients, directions)."""
+    llm_json = json.dumps({
+        "ingredients": ["1 cup flour", "2 eggs", "1/2 cup milk"],
+        "directions": ["Preheat oven to 350°F", "Mix dry ingredients"],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="A cake recipe\n1 cup flour\n2 eggs\n1/2 cup milk\nPreheat oven...",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs = result
+    assert len(ing) == 3
+    assert len(dirs) == 2
+
+
+def test_llm_extract_from_description_incomplete(monkeypatch):
+    """Only ingredients, no directions → returns None."""
+    llm_json = json.dumps({
+        "ingredients": ["1 cup flour", "2 eggs"],
+        "directions": [],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="Ingredients: 1 cup flour, 2 eggs",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is None
+
+
+def test_llm_extract_from_description_empty():
+    """Empty description returns None without calling any LLM."""
+    # No monkeypatching needed — if it calls ask_openai it would fail
+    assert rex.llm_extract_from_description("", use_local=False, model="gpt-4o-mini") is None
+    assert rex.llm_extract_from_description("   ", use_local=False, model="gpt-4o-mini") is None
+
+
+def test_process_youtube_skips_video_on_description_hit(monkeypatch, tmp_path):
+    """When description extraction succeeds, transcribe and OCR are NOT called."""
+    args = SimpleNamespace(
+        model="tiny",
+        language="en",
+        fps_sample=0.5,
+        max_frames=2,
+        cleanup=False,
+        use_local=False,
+        local_model="llama3.1:8b-instruct",
+        openai_model="gpt-4o-mini",
+    )
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_bytes(b"vid")
+
+    monkeypatch.setattr(rex, "download_youtube", lambda url, td: (
+        dummy_video, {"title": "Title", "description": "Full recipe here"}
+    ))
+
+    monkeypatch.setattr(rex, "llm_extract_from_description", lambda desc, use_local, model: (
+        ["1 cup flour", "2 eggs"], ["Preheat oven to 350°F"]
+    ))
+
+    transcribe_called = {"yes": False}
+    ocr_called = {"yes": False}
+    monkeypatch.setattr(rex, "transcribe", lambda *a, **k: (transcribe_called.update(yes=True), "")[1])
+    monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: (ocr_called.update(yes=True), [])[1])
+
+    result = rex.process_youtube("https://youtu.be/test", args)
+    assert not transcribe_called["yes"]
+    assert not ocr_called["yes"]
+    assert len(result.ingredients) == 2
+    assert len(result.directions) == 1
+
+
+def test_process_youtube_falls_through_on_description_miss(monkeypatch, tmp_path):
+    """When description extraction returns None, full pipeline runs."""
+    args = SimpleNamespace(
+        model="tiny",
+        language="en",
+        fps_sample=0.5,
+        max_frames=2,
+        cleanup=False,
+        use_local=False,
+        local_model="llama3.1:8b-instruct",
+        openai_model="gpt-4o-mini",
+    )
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_bytes(b"vid")
+
+    monkeypatch.setattr(rex, "download_youtube", lambda url, td: (
+        dummy_video, {"title": "Title", "description": "No recipe here"}
+    ))
+
+    monkeypatch.setattr(rex, "llm_extract_from_description", lambda desc, use_local, model: None)
+
+    transcribe_called = {"yes": False}
+    ocr_called = {"yes": False}
+
+    def fake_transcribe(*a, **k):
+        transcribe_called["yes"] = True
+        return "Mix well"
+
+    def fake_ocr(*a, **k):
+        ocr_called["yes"] = True
+        return ["1 cup sugar"]
+
+    monkeypatch.setattr(rex, "transcribe", fake_transcribe)
+    monkeypatch.setattr(rex, "ocr_onscreen_text", fake_ocr)
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
+
+    result = rex.process_youtube("https://youtu.be/test", args)
+    assert transcribe_called["yes"]
+    assert ocr_called["yes"]
+    assert result.ingredients
+    assert result.directions
 
