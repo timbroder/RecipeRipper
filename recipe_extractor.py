@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from fractions import Fraction
 from pathlib import Path
@@ -1251,8 +1252,8 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
     md_path.write_text("\n".join(md))
     return json_path, md_path
 
-def publish_gist(files: List[Path]) -> None:
-    """Upload files to a public GitHub Gist via the gh CLI."""
+def publish_gist(files: List[Path]) -> str:
+    """Upload files to a public GitHub Gist via the gh CLI. Returns the Gist URL."""
     if not shutil.which("gh"):
         console.print("[red]The 'gh' CLI is required for --publish. Install from https://cli.github.com/")
         sys.exit(1)
@@ -1264,7 +1265,11 @@ def publish_gist(files: List[Path]) -> None:
     if result.returncode != 0:
         console.print(f"[red]Failed to create gist: {result.stderr.strip()}")
         sys.exit(1)
-    console.print(f"[green]Gist created: {result.stdout.strip()}")
+    gist_url = result.stdout.strip()
+    console.print(f"[green]Gist created: {gist_url}")
+    paprika_url = f"paprika3://open?url={urllib.parse.quote(gist_url, safe='')}"
+    console.print(f"[blue][link={paprika_url}]Open in Paprika: {paprika_url}[/link]")
+    return gist_url
 
 
 def pretty_print(out: RecipeOutput):

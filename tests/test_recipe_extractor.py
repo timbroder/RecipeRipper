@@ -1234,11 +1234,13 @@ def test_publish_gist_success(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(rex.subprocess, "run", fake_run)
     monkeypatch.setattr(rex.shutil, "which", lambda name: "/usr/bin/gh")
 
-    rex.publish_gist([f1, f2])
+    result = rex.publish_gist([f1, f2])
 
+    assert result == "https://gist.github.com/abc123"
     assert captured["cmd"] == ["gh", "gist", "create", "--public", str(f1), str(f2)]
     out = capsys.readouterr().out
     assert "https://gist.github.com/abc123" in out
+    assert "paprika3://open?url=https%3A%2F%2Fgist.github.com%2Fabc123" in out
 
 
 def test_publish_gist_gh_missing(monkeypatch):
