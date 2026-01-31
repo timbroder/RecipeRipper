@@ -1251,8 +1251,8 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
     md_path.write_text("\n".join(md))
     return json_path, md_path
 
-def publish_gist(files: List[Path]) -> None:
-    """Upload files to a public GitHub Gist via the gh CLI."""
+def publish_gist(files: List[Path]) -> str:
+    """Upload files to a public GitHub Gist via the gh CLI. Returns the Gist URL."""
     if not shutil.which("gh"):
         console.print("[red]The 'gh' CLI is required for --publish. Install from https://cli.github.com/")
         sys.exit(1)
@@ -1264,7 +1264,9 @@ def publish_gist(files: List[Path]) -> None:
     if result.returncode != 0:
         console.print(f"[red]Failed to create gist: {result.stderr.strip()}")
         sys.exit(1)
-    console.print(f"[green]Gist created: {result.stdout.strip()}")
+    gist_url = result.stdout.strip()
+    console.print(f"[green]Gist created: {gist_url}")
+    return gist_url
 
 
 def pretty_print(out: RecipeOutput):
@@ -1363,6 +1365,7 @@ def main():
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging of each pipeline step")
     parser.add_argument("--publish", action="store_true", help="Upload output files to a public GitHub Gist (requires gh CLI)")
+    parser.add_argument("--paprika", action="store_true", help="Copy Gist URL to clipboard and open Paprika (implies --publish)")
     args = parser.parse_args()
 
     global VERBOSE
@@ -1392,8 +1395,13 @@ def main():
 
     saved = save_outputs(out, Path(args.outdir))
     pretty_print(out)
+    if args.paprika:
+        args.publish = True
     if args.publish:
-        publish_gist([saved[1]])
+        gist_url = publish_gist([saved[1]])
+        if args.paprika:
+            subprocess.run(["bash", "-c", f'echo -n "{gist_url}" | pbcopy && open -a "Paprika Recipe Manager 3"'])
+            console.print("[green]Gist URL copied to clipboard. Paste it into Paprika's browser.")
 
 if __name__ == "__main__":
     main()
