@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from fractions import Fraction
 from pathlib import Path
@@ -1267,8 +1266,6 @@ def publish_gist(files: List[Path]) -> str:
         sys.exit(1)
     gist_url = result.stdout.strip()
     console.print(f"[green]Gist created: {gist_url}")
-    paprika_url = f"paprika3://open?url={urllib.parse.quote(gist_url, safe='')}"
-    console.print(f"[blue][link={paprika_url}]Open in Paprika: {paprika_url}[/link]")
     return gist_url
 
 

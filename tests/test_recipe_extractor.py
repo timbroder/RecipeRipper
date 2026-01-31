@@ -1240,7 +1240,6 @@ def test_publish_gist_success(monkeypatch, tmp_path, capsys):
     assert captured["cmd"] == ["gh", "gist", "create", "--public", str(f1), str(f2)]
     out = capsys.readouterr().out
     assert "https://gist.github.com/abc123" in out
-    assert "paprika3://open?url=https%3A%2F%2Fgist.github.com%2Fabc123" in out
 
 
 def test_publish_gist_gh_missing(monkeypatch):
