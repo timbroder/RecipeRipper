@@ -1264,6 +1264,43 @@ def test_publish_gist_gh_failure(monkeypatch, tmp_path, capsys):
     assert "auth required" in out
 
 
+def test_paprika_flag_copies_and_opens(monkeypatch, tmp_path):
+    """--paprika implies --publish, copies URL to clipboard, and opens Paprika."""
+    monkeypatch.setattr(sys, "argv", [
+        "prog", "--youtube", "https://youtu.be/test",
+        "--outdir", str(tmp_path), "--paprika",
+    ])
+    monkeypatch.setattr(rex, "ensure_ffmpeg", lambda: None)
+
+    dummy_recipe = rex.RecipeOutput(
+        title="T", url="u", ingredients=[], directions=[], extras={}, raw_sources={},
+    )
+    monkeypatch.setattr(rex, "process_youtube", lambda url, args: dummy_recipe)
+    monkeypatch.setattr(rex, "save_outputs", lambda out, od: (Path("/fake/recipe.json"), Path("/fake/recipe.md")))
+    monkeypatch.setattr(rex, "pretty_print", lambda out: None)
+    monkeypatch.setattr(rex.shutil, "which", lambda name: "/usr/bin/gh")
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("cmd")
+        if cmd[0] == "gh":
+            return SimpleNamespace(returncode=0, stdout="https://gist.github.com/abc123\n", stderr="")
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(rex.subprocess, "run", fake_run)
+
+    rex.main()
+
+    assert len(calls) == 1
+    bash_cmd = calls[0]
+    assert bash_cmd[0] == "bash"
+    assert "pbcopy" in bash_cmd[2]
+    assert "Paprika Recipe Manager 3" in bash_cmd[2]
+    assert "https://gist.github.com/abc123" in bash_cmd[2]
+
+
 # -----------------------------
 # Cross-reference false-positive & promotion tests
 # -----------------------------

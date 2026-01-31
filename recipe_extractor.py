@@ -1365,6 +1365,7 @@ def main():
     parser.add_argument("--list-models", action="store_true", help="Show recommended Faster-Whisper sizes & requirements")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging of each pipeline step")
     parser.add_argument("--publish", action="store_true", help="Upload output files to a public GitHub Gist (requires gh CLI)")
+    parser.add_argument("--paprika", action="store_true", help="Copy Gist URL to clipboard and open Paprika (implies --publish)")
     args = parser.parse_args()
 
     global VERBOSE
@@ -1394,8 +1395,13 @@ def main():
 
     saved = save_outputs(out, Path(args.outdir))
     pretty_print(out)
+    if args.paprika:
+        args.publish = True
     if args.publish:
-        publish_gist([saved[1]])
+        gist_url = publish_gist([saved[1]])
+        if args.paprika:
+            subprocess.run(["bash", "-c", f'echo -n "{gist_url}" | pbcopy && open -a "Paprika Recipe Manager 3"'])
+            console.print("[green]Gist URL copied to clipboard. Paste it into Paprika's browser.")
 
 if __name__ == "__main__":
     main()
