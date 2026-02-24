@@ -24,17 +24,15 @@
 			<key>uid</key>
 			<string>8EB88318-DF63-4999-8EAE-8B5F60AAFFC9</string>
 			<key>version</key>
-			<integer>2</integer>
+			<integer>1</integer>
 			<key>config</key>
 			<dict>
 				<key>keyword</key>
 				<string>rip</string>
-				<key>title</key>
+				<key>text</key>
 				<string>Rip Recipe</string>
 				<key>subtext</key>
 				<string>Extract recipe from a video URL</string>
-				<key>text</key>
-				<string>Extracting recipe...</string>
 				<key>withspace</key>
 				<true/>
 				<key>argumenttype</key>
@@ -48,20 +46,19 @@
 			<key>uid</key>
 			<string>D5186438-7B16-4CD2-A87E-CA1781222F91</string>
 			<key>version</key>
-			<integer>2</integer>
+			<integer>1</integer>
 			<key>config</key>
 			<dict>
-				<key>title</key>
+				<key>name</key>
 				<string>Rip Recipe</string>
-				<key>text</key>
-				<string>Extract recipe from URL</string>
-				<key>argument</key>
+				<key>acceptsurls</key>
+				<true/>
+				<key>acceptstext</key>
+				<true/>
+				<key>acceptsfiles</key>
+				<false/>
+				<key>acceptsmulti</key>
 				<integer>0</integer>
-				<key>types</key>
-				<array>
-					<string>public.url</string>
-					<string>public.plain-text</string>
-				</array>
 			</dict>
 		</dict>
 		<!-- Run Script Action -->
@@ -100,8 +97,8 @@
 				<integer>0</integer>
 				<key>modifiersubtext</key>
 				<string></string>
-				<key>vitoithings</key>
-				<integer>0</integer>
+				<key>vitoclose</key>
+				<false/>
 			</dict>
 		</array>
 		<key>D5186438-7B16-4CD2-A87E-CA1781222F91</key>
@@ -113,8 +110,8 @@
 				<integer>0</integer>
 				<key>modifiersubtext</key>
 				<string></string>
-				<key>vitoithings</key>
-				<integer>0</integer>
+				<key>vitoclose</key>
+				<false/>
 			</dict>
 		</array>
 	</dict>
