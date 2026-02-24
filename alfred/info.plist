@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>bundleid</key>
+	<string>com.reciperipper.alfred</string>
+	<key>name</key>
+	<string>RecipeRipper</string>
+	<key>description</key>
+	<string>Extract recipes from video URLs</string>
+	<key>createdby</key>
+	<string>Tim Broder</string>
+	<key>version</key>
+	<string>1.0.0</string>
+	<key>disabled</key>
+	<false/>
+	<key>objects</key>
+	<array>
+		<!-- Keyword Input "rip" -->
+		<dict>
+			<key>type</key>
+			<string>alfred.workflow.input.keyword</string>
+			<key>uid</key>
+			<string>8EB88318-DF63-4999-8EAE-8B5F60AAFFC9</string>
+			<key>version</key>
+			<integer>2</integer>
+			<key>config</key>
+			<dict>
+				<key>keyword</key>
+				<string>rip</string>
+				<key>title</key>
+				<string>Rip Recipe</string>
+				<key>subtext</key>
+				<string>Extract recipe from a video URL</string>
+				<key>text</key>
+				<string>Extracting recipe...</string>
+				<key>withspace</key>
+				<true/>
+				<key>argumenttype</key>
+				<integer>0</integer>
+			</dict>
+		</dict>
+		<!-- Universal Action -->
+		<dict>
+			<key>type</key>
+			<string>alfred.workflow.trigger.universalaction</string>
+			<key>uid</key>
+			<string>D5186438-7B16-4CD2-A87E-CA1781222F91</string>
+			<key>version</key>
+			<integer>2</integer>
+			<key>config</key>
+			<dict>
+				<key>title</key>
+				<string>Rip Recipe</string>
+				<key>text</key>
+				<string>Extract recipe from URL</string>
+				<key>argument</key>
+				<integer>0</integer>
+				<key>types</key>
+				<array>
+					<string>public.url</string>
+					<string>public.plain-text</string>
+				</array>
+			</dict>
+		</dict>
+		<!-- Run Script Action -->
+		<dict>
+			<key>type</key>
+			<string>alfred.workflow.action.script</string>
+			<key>uid</key>
+			<string>7F968586-B3DA-4720-B1F1-001BC848D259</string>
+			<key>version</key>
+			<integer>2</integer>
+			<key>config</key>
+			<dict>
+				<key>concurrently</key>
+				<false/>
+				<key>escaping</key>
+				<integer>0</integer>
+				<key>script</key>
+				<string>cd /Users/tim/workspace/personal/RecipeRipper &amp;&amp; source .venv/bin/activate &amp;&amp; python recipe_extractor.py --youtube "{query}" --cleanup --max-frames 30 --publish --paprika</string>
+				<key>scriptargtype</key>
+				<integer>0</integer>
+				<key>scriptfile</key>
+				<string></string>
+				<key>type</key>
+				<integer>0</integer>
+			</dict>
+		</dict>
+	</array>
+	<key>connections</key>
+	<dict>
+		<key>8EB88318-DF63-4999-8EAE-8B5F60AAFFC9</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>7F968586-B3DA-4720-B1F1-001BC848D259</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoithings</key>
+				<integer>0</integer>
+			</dict>
+		</array>
+		<key>D5186438-7B16-4CD2-A87E-CA1781222F91</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>7F968586-B3DA-4720-B1F1-001BC848D259</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoithings</key>
+				<integer>0</integer>
+			</dict>
+		</array>
+	</dict>
+	<key>uidata</key>
+	<dict>
+		<key>8EB88318-DF63-4999-8EAE-8B5F60AAFFC9</key>
+		<dict>
+			<key>xpos</key>
+			<real>100</real>
+			<key>ypos</key>
+			<real>100</real>
+		</dict>
+		<key>D5186438-7B16-4CD2-A87E-CA1781222F91</key>
+		<dict>
+			<key>xpos</key>
+			<real>100</real>
+			<key>ypos</key>
+			<real>250</real>
+		</dict>
+		<key>7F968586-B3DA-4720-B1F1-001BC848D259</key>
+		<dict>
+			<key>xpos</key>
+			<real>400</real>
+			<key>ypos</key>
+			<real>175</real>
+		</dict>
+	</dict>
+</dict>
+</plist>
