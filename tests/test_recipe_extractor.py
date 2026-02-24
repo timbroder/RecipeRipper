@@ -1186,9 +1186,45 @@ def test_save_outputs_with_warnings(tmp_path, monkeypatch):
     assert "Unused ingredient: vanilla" in md_text
     assert "Missing ingredient: butter (added to ingredients)" in md_text
 
+    assert "[RecipeRipper](https://github.com/timbroder/RecipeRipper)" in md_text
+
     json_data = json.loads((outdir / "cake.json").read_text())
     assert "warnings" in json_data
     assert len(json_data["warnings"]) == 2
+
+
+def test_save_outputs_md_contains_repo_link(tmp_path, monkeypatch):
+    recipe = rex.RecipeOutput(
+        title="Soup",
+        ingredients=[rex.Ingredient(original="1 onion", item="onion")],
+        directions=["Chop"],
+    )
+
+    def fake_dump(self, indent=2, ensure_ascii=False):
+        return json.dumps(self.model_dump(), indent=indent)
+
+    monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
+    rex.save_outputs(recipe, tmp_path)
+    md_text = (tmp_path / "soup.md").read_text()
+    assert "[RecipeRipper](https://github.com/timbroder/RecipeRipper)" in md_text
+
+
+def test_save_outputs_md_footer_includes_model(tmp_path, monkeypatch):
+    recipe = rex.RecipeOutput(
+        title="Soup",
+        ingredients=[rex.Ingredient(original="1 onion", item="onion")],
+        directions=["Chop"],
+        model="gpt-4o-mini",
+    )
+
+    def fake_dump(self, indent=2, ensure_ascii=False):
+        return json.dumps(self.model_dump(), indent=indent)
+
+    monkeypatch.setattr(rex.RecipeOutput, "model_dump_json", fake_dump, raising=False)
+    rex.save_outputs(recipe, tmp_path)
+    md_text = (tmp_path / "soup.md").read_text()
+    assert "Processed with gpt-4o-mini" in md_text
+    assert "RecipeRipper" in md_text
 
 
 # -----------------------------
