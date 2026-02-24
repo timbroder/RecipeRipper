@@ -1244,10 +1244,13 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
         md.append("## Warnings")
         for w in out.warnings:
             md.append(f"- {w}")
+    md.append("")
+    md.append("---")
+    footer_parts = []
     if out.model:
-        md.append("")
-        md.append("---")
-        md.append(f"*Processed with {out.model}*")
+        footer_parts.append(f"Processed with {out.model}")
+    footer_parts.append("[RecipeRipper](https://github.com/timbroder/RecipeRipper)")
+    md.append(f"*{' | '.join(footer_parts)}*")
     md_path.write_text("\n".join(md))
     return json_path, md_path
 
