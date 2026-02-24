@@ -76,7 +76,7 @@
 				<key>escaping</key>
 				<integer>0</integer>
 				<key>script</key>
-				<string>cd /Users/tim/workspace/personal/RecipeRipper &amp;&amp; source .venv/bin/activate &amp;&amp; python recipe_extractor.py --youtube "{query}" --cleanup --max-frames 30 --publish --paprika</string>
+				<string>cd /Users/tim/workspace/personal/RecipeRipper &amp;&amp; source .venv/bin/activate &amp;&amp; gist_url=$(python recipe_extractor.py --youtube "{query}" --cleanup --max-frames 30 --publish --paprika 2&gt;&amp;1 | grep -oE 'https://gist\.github\.com/[^ ]+') &amp;&amp; [ -n "$gist_url" ] &amp;&amp; open "$gist_url"</string>
 				<key>scriptargtype</key>
 				<integer>0</integer>
 				<key>scriptfile</key>
