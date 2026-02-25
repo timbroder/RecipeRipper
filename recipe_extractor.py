@@ -80,6 +80,8 @@ FRACT = r"(?:\d+\s*\d?/\d+|\d+/\d+|\d+\.\d+|\d+)"
 QTY_PATTERN = rf"^\s*(?P<qty>{FRACT})(\s*(?P<unit>{UNITS_PATTERN}))?\b"
 BULLET_PATTERN = r"^\s*[-•*]\s*"
 
+TASTE_MODIFIER_RE = re.compile(r"\b(to taste|as needed|for garnish|for serving|optional)\b", re.I)
+
 IMPERATIVE_VERBS = [
     "add","bake","blend","boil","braise","break","bring","broil","brown","brush","chill","chop",
     "combine","cook","cool","crack","cream","cube","cut","deglaze","dice","divide","drain","drizzle",
@@ -396,6 +398,11 @@ def llm_extract_recipe(
         "- \"nutritional_info\" is an object with string keys and values for any macros/nutrition data "
         "mentioned (e.g. {\"calories\": \"420\", \"protein\": \"57g\", \"fat\": \"15g\", \"carbs\": \"20g\", \"servings\": \"10\"}). "
         "Set to null if no nutritional info is present.\n"
+        "- The text comes from speech-to-text transcription and OCR, so it may contain errors. "
+        "Use context to correct obvious mistakes (e.g. if \"ram seasoning\" appears but \"ranch\" "
+        "appears elsewhere in the text, use \"ranch seasoning\").\n"
+        "- Write complete words — never truncate (e.g. \"chicken breast\" not \"chicken breas\").\n"
+        "- Include ALL steps mentioned, including final assembly and serving.\n"
         "- Ignore commentary, opinions, and non-recipe content\n"
         "- Do NOT wrap the JSON in markdown code fences\n\n"
         f"Raw text:\n{raw_text}\n\n"
@@ -614,6 +621,10 @@ def looks_like_ingredient(line: str) -> bool:
     if re.search(UNITS_PATTERN, line_s, flags=re.I):
         if any(food in line_lower for food in FOOD_WORDS):
             return True
+    # Quantity-less ingredients with taste/need modifiers (e.g. "salt and pepper to taste")
+    if TASTE_MODIFIER_RE.search(line_lower):
+        if any(food in line_lower for food in FOOD_WORDS):
+            return True
     return False
 
 def parse_ingredient(line: str) -> Ingredient:
@@ -624,7 +635,7 @@ def parse_ingredient(line: str) -> Ingredient:
     if m:
         qty = m.group("qty")
         unit = (m.group("unit") or "").strip() or None
-        rest = s[m.end():].strip(",;-: \\t")
+        rest = s[m.end():].strip(",;-: \t")
     item = rest
     notes = None
     if "(" in rest and ")" in rest:
@@ -731,8 +742,11 @@ def extract_ingredients_from_sentence(sentence: str) -> List[str]:
                     extracted.append(ingredient.title())
 
     # Also look for "salt and pepper" type mentions
-    if re.search(r"\bsalt\s+and\s+pepper\b", s) and "salt and pepper" not in seen_in_sentence:
-        extracted.append("Salt And Pepper")
+    if re.search(r"\bsalt\s+and\s+pepper\b", s):
+        phrase = "Salt and pepper to taste" if "to taste" in s else "Salt and pepper"
+        if phrase.lower() not in seen_in_sentence:
+            seen_in_sentence.add(phrase.lower())
+            extracted.append(phrase)
 
     return extracted
 
@@ -877,13 +891,14 @@ def combine_sources(
             if key_normalized in existing or existing in key_normalized:
                 is_dup = True
                 break
-        # Also check if main food word already captured
-        for food in FOOD_WORDS:
-            if food in key_normalized and food in seen_foods:
-                # Check if this is just a partial match (like "CUP OF BROTH" when we have "one cup of broth")
-                if len(key_normalized.split()) <= 3:
-                    is_dup = True
-                    break
+        # Also check if main food word already captured — only mark as dup
+        # if ALL food words in the candidate are already seen (so "salt and
+        # pepper" isn't dropped just because "salt" appeared elsewhere)
+        candidate_foods = [food for food in FOOD_WORDS if food in key_normalized]
+        if candidate_foods and all(food in seen_foods for food in candidate_foods):
+            # Check if this is just a partial match (like "CUP OF BROTH" when we have "one cup of broth")
+            if len(key_normalized.split()) <= 3:
+                is_dup = True
         if not is_dup and key_normalized not in seen:
             seen.add(key_normalized)
             # Track food words in this ingredient

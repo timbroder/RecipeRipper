@@ -1454,6 +1454,63 @@ def test_paprika_flag_copies_and_opens(monkeypatch, tmp_path):
 # -----------------------------
 
 
+# -----------------------------
+# "Salt and pepper to taste" fix tests
+# -----------------------------
+
+
+def test_looks_like_ingredient_salt_and_pepper_to_taste():
+    """'salt and pepper to taste' should be recognized as an ingredient."""
+    assert rex.looks_like_ingredient("salt and pepper to taste")
+    assert rex.looks_like_ingredient("Salt and pepper to taste")
+    assert rex.looks_like_ingredient("salt to taste")
+    assert rex.looks_like_ingredient("pepper as needed")
+    assert rex.looks_like_ingredient("fresh garlic, optional")
+    assert rex.looks_like_ingredient("parsley for garnish")
+
+
+def test_looks_like_ingredient_still_rejects_non_food():
+    """Taste modifiers without food words should still be rejected."""
+    assert not rex.looks_like_ingredient("patience as needed")
+    assert not rex.looks_like_ingredient("love to taste")
+
+
+def test_extract_ingredients_preserves_to_taste():
+    """extract_ingredients_from_sentence should preserve 'to taste' qualifier."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper to taste")
+    assert any("to taste" in r.lower() for r in result)
+
+
+def test_extract_ingredients_salt_pepper_without_to_taste():
+    """Without 'to taste', should still extract 'Salt and pepper'."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper")
+    assert any("salt and pepper" in r.lower() for r in result)
+
+
+def test_dedup_does_not_eat_compound_ingredient():
+    """'salt and pepper' should not be deduped when only 'salt' was seen from another ingredient."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="I'm using a pinch of salt. Then add salt and pepper to taste.",
+        ocr_lines=[],
+    )
+    joined = " ".join(ing_lines).lower()
+    # "salt and pepper" should survive even though "salt" appeared separately
+    assert "pepper" in joined
+
+
+def test_dedup_still_removes_true_duplicates():
+    """A true duplicate (all food words already seen) should still be removed."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="",
+        ocr_lines=["1 tsp salt", "salt"],
+    )
+    # "salt" alone (3 words or fewer, only food word is "salt") should be deduped
+    salt_count = sum(1 for l in ing_lines if l.strip().lower() == "salt")
+    assert salt_count == 0
+
+
 def test_extract_food_words_multi_word_suppresses_single():
     """'nutritional yeast' in text should NOT also yield standalone 'yeast'."""
     found = rex._extract_food_words_from_text("nutritional yeast")
