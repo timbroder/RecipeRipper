@@ -300,13 +300,14 @@ def test_parsing_helpers(monkeypatch):
     assert "1 cup sugar" in ings
     assert "Random note" in other
 
-    ing_lines, dir_lines = rex.combine_sources(
+    ing_lines, dir_lines, nutritional_info = rex.combine_sources(
         "1 cup sugar. Stir well.",
         "Bake for 10 minutes.",
         ["Sprinkle nuts"],
     )
     assert isinstance(ing_lines, list)
     assert isinstance(dir_lines, list)
+    assert nutritional_info is None
 
 
 def test_cleaning_helpers(monkeypatch):
@@ -355,7 +356,7 @@ def test_process_youtube(monkeypatch, tmp_path):
     monkeypatch.setattr(rex, "llm_extract_from_description", lambda *a, **k: None)
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Mix well")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 cup sugar"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"], None))
     original_sub = rex.re.sub
 
     def safe_sub(pattern, repl, string, count=0, flags=0):
@@ -389,7 +390,7 @@ def test_process_local_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Chop onions")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 onion"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 onion"], ["Chop onions"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 onion"], ["Chop onions"], None))
 
     result = rex.process_local(str(video_file), args)
     assert result.title == "local"
@@ -636,7 +637,7 @@ def test_llm_extract_recipe_openai(monkeypatch):
 
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="A simple cake recipe",
         transcript="First preheat the oven. Mix the dry ingredients.",
         ocr_lines=["1 cup flour", "2 eggs"],
@@ -645,6 +646,7 @@ def test_llm_extract_recipe_openai(monkeypatch):
     )
     assert ing == ["1 cup flour", "2 eggs", "1/2 cup milk"]
     assert dirs == ["Preheat oven to 350°F", "Mix dry ingredients", "Bake for 25 minutes"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_local(monkeypatch):
@@ -657,7 +659,7 @@ def test_llm_extract_recipe_local(monkeypatch):
     monkeypatch.setattr(rex, "ensure_local_model", lambda model: None)
     monkeypatch.setattr(rex, "ask_local_model", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="Mince the garlic cloves",
         ocr_lines=[],
@@ -666,6 +668,7 @@ def test_llm_extract_recipe_local(monkeypatch):
     )
     assert ing == ["2 cloves garlic"]
     assert dirs == ["Mince the garlic"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_with_code_fences(monkeypatch):
@@ -674,7 +677,7 @@ def test_llm_extract_recipe_with_code_fences(monkeypatch):
 
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_response)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="Stir sugar well",
         ocr_lines=[],
@@ -683,6 +686,7 @@ def test_llm_extract_recipe_with_code_fences(monkeypatch):
     )
     assert ing == ["1 cup sugar"]
     assert dirs == ["Stir well"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
@@ -694,12 +698,12 @@ def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
 
     def mock_combine(desc, trans, ocr, use_local=None, llm_model=None):
         if use_local is None and llm_model is None:
-            return (["fallback ingredient"], ["fallback direction"])
+            return (["fallback ingredient"], ["fallback direction"], None)
         return original_combine(desc, trans, ocr, use_local=use_local, llm_model=llm_model)
 
     monkeypatch.setattr(rex, "combine_sources", mock_combine)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="fallback test",
         ocr_lines=[],
@@ -708,6 +712,7 @@ def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
     )
     assert ing == ["fallback ingredient"]
     assert dirs == ["fallback direction"]
+    assert nutritional_info is None
 
 
 def test_ensure_local_model_already_present(monkeypatch):
@@ -873,10 +878,11 @@ def test_combine_sources_with_llm(monkeypatch):
     llm_json = json.dumps({
         "ingredients": ["1 lb chicken"],
         "directions": ["Grill the chicken"],
+        "nutritional_info": {"calories": "300", "protein": "40g"},
     })
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.combine_sources(
+    ing, dirs, nutritional_info = rex.combine_sources(
         description="Grilled chicken recipe",
         transcript="Grill the chicken for 10 minutes",
         ocr_lines=["1 lb chicken"],
@@ -885,11 +891,12 @@ def test_combine_sources_with_llm(monkeypatch):
     )
     assert ing == ["1 lb chicken"]
     assert dirs == ["Grill the chicken"]
+    assert nutritional_info == {"calories": "300", "protein": "40g"}
 
 
 def test_combine_sources_without_llm():
     """Test that combine_sources falls back to heuristic when no LLM params."""
-    ing, dirs = rex.combine_sources(
+    ing, dirs, nutritional_info = rex.combine_sources(
         description="1 cup sugar. Stir well.",
         transcript="Bake for 10 minutes.",
         ocr_lines=["Sprinkle nuts"],
@@ -898,11 +905,115 @@ def test_combine_sources_without_llm():
     # just verify it returns the right shape)
     assert isinstance(ing, list)
     assert isinstance(dirs, list)
+    assert nutritional_info is None
+
+
+def test_llm_extract_recipe_with_nutritional_info(monkeypatch):
+    """Test that nutritional_info is extracted when present in LLM response."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs"],
+        "directions": ["Cook the beef", "Scramble the eggs"],
+        "nutritional_info": {"calories": "420", "protein": "57g", "fat": "15g", "carbs": "20g", "servings": "10"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
+        description="420 calories 57g protein",
+        transcript="Cook the beef",
+        ocr_lines=[],
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert nutritional_info == {"calories": "420", "protein": "57g", "fat": "15g", "carbs": "20g", "servings": "10"}
+
+
+def test_llm_extract_from_description_with_nutritional_info(monkeypatch):
+    """Test that nutritional_info is extracted from description-first path."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs"],
+        "directions": ["Cook the beef"],
+        "nutritional_info": {"calories": "420", "protein": "57g"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="420 calories 57g protein\n3 lbs beef\n10 eggs\nCook the beef",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs, nutritional_info = result
+    assert nutritional_info == {"calories": "420", "protein": "57g"}
+
+
+def test_save_outputs_includes_nutrition(tmp_path):
+    """Test that nutritional_info appears in the markdown output."""
+    out = rex.RecipeOutput(
+        title="Test Recipe",
+        ingredients=[rex.Ingredient(original="1 cup flour", item="flour")],
+        directions=["Mix well"],
+        nutritional_info={"calories": "420", "protein": "57g", "fat": "15g"},
+    )
+    _, md_path = rex.save_outputs(out, tmp_path)
+    md_content = md_path.read_text()
+    assert "## Nutrition" in md_content
+    assert "**Calories:** 420" in md_content
+    assert "**Protein:** 57g" in md_content
+    assert "**Fat:** 15g" in md_content
+
+
+def test_save_outputs_no_nutrition_section_when_none(tmp_path):
+    """Test that Nutrition section is omitted when nutritional_info is None."""
+    out = rex.RecipeOutput(
+        title="Test Recipe",
+        ingredients=[rex.Ingredient(original="1 cup flour", item="flour")],
+        directions=["Mix well"],
+    )
+    _, md_path = rex.save_outputs(out, tmp_path)
+    md_content = md_path.read_text()
+    assert "## Nutrition" not in md_content
 
 
 # -----------------------------
 # Description-first extraction tests
 # -----------------------------
+
+
+def test_llm_extract_from_description_rejects_hallucinated_recipe(monkeypatch):
+    """Description with no real recipe should return None even if LLM hallucinates."""
+    # LLM hallucinates ingredients without quantities from just a title
+    llm_json = json.dumps({
+        "ingredients": ["Chicken", "Bacon", "Rice"],
+        "directions": ["Cook the chicken", "Add the rice"],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="Chicken Bacon Fried Rice\nPer Serving: 530 Calories, 56g Protein",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is None
+
+
+def test_llm_extract_from_description_accepts_real_recipe(monkeypatch):
+    """Description with real ingredients (quantities) should be accepted."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs", "1 pack bacon", "10 wraps"],
+        "directions": ["Cook the beef", "Cook the eggs", "Wrap everything"],
+        "nutritional_info": {"calories": "420", "protein": "57g"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="3lbs beef\n10 eggs\n1 pack bacon\n10 wraps\nCook the beef...",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs, nutritional_info = result
+    assert len(ing) == 4
+    assert nutritional_info == {"calories": "420", "protein": "57g"}
 
 
 def test_llm_extract_from_description_success(monkeypatch):
@@ -919,9 +1030,10 @@ def test_llm_extract_from_description_success(monkeypatch):
         model="gpt-4o-mini",
     )
     assert result is not None
-    ing, dirs = result
+    ing, dirs, nutritional_info = result
     assert len(ing) == 3
     assert len(dirs) == 2
+    assert nutritional_info is None
 
 
 def test_llm_extract_from_description_incomplete(monkeypatch):
@@ -968,7 +1080,7 @@ def test_process_youtube_skips_video_on_description_hit(monkeypatch, tmp_path):
     ))
 
     monkeypatch.setattr(rex, "llm_extract_from_description", lambda desc, use_local, model: (
-        ["1 cup flour", "2 eggs"], ["Preheat oven to 350°F"]
+        ["1 cup flour", "2 eggs"], ["Preheat oven to 350°F"], None
     ))
 
     transcribe_called = {"yes": False}
@@ -1018,7 +1130,7 @@ def test_process_youtube_falls_through_on_description_miss(monkeypatch, tmp_path
 
     monkeypatch.setattr(rex, "transcribe", fake_transcribe)
     monkeypatch.setattr(rex, "ocr_onscreen_text", fake_ocr)
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"], None))
 
     result = rex.process_youtube("https://youtu.be/test", args)
     assert transcribe_called["yes"]
@@ -1340,6 +1452,63 @@ def test_paprika_flag_copies_and_opens(monkeypatch, tmp_path):
 # -----------------------------
 # Cross-reference false-positive & promotion tests
 # -----------------------------
+
+
+# -----------------------------
+# "Salt and pepper to taste" fix tests
+# -----------------------------
+
+
+def test_looks_like_ingredient_salt_and_pepper_to_taste():
+    """'salt and pepper to taste' should be recognized as an ingredient."""
+    assert rex.looks_like_ingredient("salt and pepper to taste")
+    assert rex.looks_like_ingredient("Salt and pepper to taste")
+    assert rex.looks_like_ingredient("salt to taste")
+    assert rex.looks_like_ingredient("pepper as needed")
+    assert rex.looks_like_ingredient("fresh garlic, optional")
+    assert rex.looks_like_ingredient("parsley for garnish")
+
+
+def test_looks_like_ingredient_still_rejects_non_food():
+    """Taste modifiers without food words should still be rejected."""
+    assert not rex.looks_like_ingredient("patience as needed")
+    assert not rex.looks_like_ingredient("love to taste")
+
+
+def test_extract_ingredients_preserves_to_taste():
+    """extract_ingredients_from_sentence should preserve 'to taste' qualifier."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper to taste")
+    assert any("to taste" in r.lower() for r in result)
+
+
+def test_extract_ingredients_salt_pepper_without_to_taste():
+    """Without 'to taste', should still extract 'Salt and pepper'."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper")
+    assert any("salt and pepper" in r.lower() for r in result)
+
+
+def test_dedup_does_not_eat_compound_ingredient():
+    """'salt and pepper' should not be deduped when only 'salt' was seen from another ingredient."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="I'm using a pinch of salt. Then add salt and pepper to taste.",
+        ocr_lines=[],
+    )
+    joined = " ".join(ing_lines).lower()
+    # "salt and pepper" should survive even though "salt" appeared separately
+    assert "pepper" in joined
+
+
+def test_dedup_still_removes_true_duplicates():
+    """A true duplicate (all food words already seen) should still be removed."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="",
+        ocr_lines=["1 tsp salt", "salt"],
+    )
+    # "salt" alone (3 words or fewer, only food word is "salt") should be deduped
+    salt_count = sum(1 for l in ing_lines if l.strip().lower() == "salt")
+    assert salt_count == 0
 
 
 def test_extract_food_words_multi_word_suppresses_single():
