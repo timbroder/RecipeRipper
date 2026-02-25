@@ -979,6 +979,43 @@ def test_save_outputs_no_nutrition_section_when_none(tmp_path):
 # -----------------------------
 
 
+def test_llm_extract_from_description_rejects_hallucinated_recipe(monkeypatch):
+    """Description with no real recipe should return None even if LLM hallucinates."""
+    # LLM hallucinates ingredients without quantities from just a title
+    llm_json = json.dumps({
+        "ingredients": ["Chicken", "Bacon", "Rice"],
+        "directions": ["Cook the chicken", "Add the rice"],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="Chicken Bacon Fried Rice\nPer Serving: 530 Calories, 56g Protein",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is None
+
+
+def test_llm_extract_from_description_accepts_real_recipe(monkeypatch):
+    """Description with real ingredients (quantities) should be accepted."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs", "1 pack bacon", "10 wraps"],
+        "directions": ["Cook the beef", "Cook the eggs", "Wrap everything"],
+        "nutritional_info": {"calories": "420", "protein": "57g"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="3lbs beef\n10 eggs\n1 pack bacon\n10 wraps\nCook the beef...",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs, nutritional_info = result
+    assert len(ing) == 4
+    assert nutritional_info == {"calories": "420", "protein": "57g"}
+
+
 def test_llm_extract_from_description_success(monkeypatch):
     """Complete recipe from description returns (ingredients, directions)."""
     llm_json = json.dumps({

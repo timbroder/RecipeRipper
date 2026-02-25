@@ -460,6 +460,10 @@ def llm_extract_from_description(
         "- \"nutritional_info\" is an object with string keys and values for any macros/nutrition data "
         "mentioned (e.g. {\"calories\": \"420\", \"protein\": \"57g\", \"fat\": \"15g\", \"carbs\": \"20g\", \"servings\": \"10\"}). "
         "Set to null if no nutritional info is present.\n"
+        "- ONLY extract ingredients and directions that are EXPLICITLY written in the description. "
+        "Do NOT infer, guess, or generate a recipe from just a title or topic.\n"
+        "- If the description does not contain an actual ingredient list or cooking steps, "
+        "return empty arrays for ingredients and directions.\n"
         "- Ignore commentary, opinions, and non-recipe content\n"
         "- Do NOT wrap the JSON in markdown code fences\n\n"
         f"Video description:\n{description}\n\n"
@@ -493,9 +497,17 @@ def llm_extract_from_description(
     dir_lines = data.get("directions", [])
     nutritional_info = data.get("nutritional_info")
 
-    if len(ing_lines) >= 2 and len(dir_lines) >= 1:
-        return ing_lines, dir_lines, nutritional_info
-    return None
+    if len(ing_lines) < 2 or len(dir_lines) < 1:
+        return None
+
+    # Reject hallucinated recipes: if most ingredients lack quantities,
+    # the LLM likely invented them from just a title/topic.
+    qty_pattern = re.compile(r"\d")
+    with_qty = sum(1 for ing in ing_lines if qty_pattern.search(ing))
+    if with_qty < len(ing_lines) * 0.5:
+        return None
+
+    return ing_lines, dir_lines, nutritional_info
 
 
 # -----------------------------
