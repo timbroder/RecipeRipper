@@ -48,6 +48,7 @@ class RecipeOutput(BaseModel):
     url: Optional[str] = None
     ingredients: List[Ingredient] = Field(default_factory=list)
     directions: List[str] = Field(default_factory=list)
+    nutritional_info: Optional[Dict[str, str]] = None
     extras: Dict[str, List[str]] = Field(default_factory=dict)
     raw_sources: Dict[str, str] = Field(default_factory=dict)  # transcript, description
     warnings: List[str] = Field(default_factory=list)
@@ -370,7 +371,7 @@ def llm_extract_recipe(
     ocr_lines: List[str],
     use_local: bool,
     model: str,
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], Optional[Dict[str, str]]]:
     """Use an LLM to extract ingredients and directions from raw text sources."""
     filtered_ocr = [ln for ln in ocr_lines if not is_noise(ln)]
 
@@ -386,14 +387,23 @@ def llm_extract_recipe(
 
     prompt = (
         "You are a recipe extraction assistant. Given the following raw text from a recipe video, "
-        "extract the actual recipe ingredients (with quantities when available) and cooking directions.\n\n"
+        "extract the actual recipe ingredients (with quantities when available), cooking directions, "
+        "and nutritional information (macros) if present.\n\n"
         "Rules:\n"
-        "- Return ONLY a JSON object with two keys: \"ingredients\" and \"directions\"\n"
+        "- Return ONLY a JSON object with three keys: \"ingredients\", \"directions\", and \"nutritional_info\"\n"
         "- \"ingredients\" is a list of strings, each a single ingredient with quantity and unit "
         "(e.g. \"1 cup flour\", \"2 cloves garlic, minced\")\n"
         "- \"directions\" is a list of strings, each a single cooking step in imperative form "
         "(e.g. \"Sauté the onion until translucent\", \"Preheat oven to 350°F\")\n"
-        "- Ignore commentary, opinions, nutrition info, and non-recipe content\n"
+        "- \"nutritional_info\" is an object with string keys and values for any macros/nutrition data "
+        "mentioned (e.g. {\"calories\": \"420\", \"protein\": \"57g\", \"fat\": \"15g\", \"carbs\": \"20g\", \"servings\": \"10\"}). "
+        "Set to null if no nutritional info is present.\n"
+        "- The text comes from speech-to-text transcription and OCR, so it may contain errors. "
+        "Use context to correct obvious mistakes (e.g. if \"ram seasoning\" appears but \"ranch\" "
+        "appears elsewhere in the text, use \"ranch seasoning\").\n"
+        "- Write complete words — never truncate (e.g. \"chicken breast\" not \"chicken breas\").\n"
+        "- Include ALL steps mentioned, including final assembly and serving.\n"
+        "- Ignore commentary, opinions, and non-recipe content\n"
         "- Do NOT wrap the JSON in markdown code fences\n\n"
         f"Raw text:\n{raw_text}\n\n"
         "JSON:"
@@ -420,18 +430,20 @@ def llm_extract_recipe(
             data = json.loads(m.group())
         else:
             console.print("[yellow]LLM did not return valid JSON; falling back to heuristic parsing.")
-            return combine_sources(description, transcript, ocr_lines)
+            ings, dirs, _ = combine_sources(description, transcript, ocr_lines)
+            return ings, dirs, None
 
     ing_lines = data.get("ingredients", [])
     dir_lines = data.get("directions", [])
-    return ing_lines, dir_lines
+    nutritional_info = data.get("nutritional_info")
+    return ing_lines, dir_lines, nutritional_info
 
 
 def llm_extract_from_description(
     description: str,
     use_local: bool,
     model: str,
-) -> Optional[Tuple[List[str], List[str]]]:
+) -> Optional[Tuple[List[str], List[str], Optional[Dict[str, str]]]]:
     """Try to extract a complete recipe from just the video description.
 
     Returns (ingredients, directions) if the description yields at least
@@ -444,14 +456,22 @@ def llm_extract_from_description(
 
     prompt = (
         "You are a recipe extraction assistant. Given the following video description, "
-        "extract the actual recipe ingredients (with quantities when available) and cooking directions.\n\n"
+        "extract the actual recipe ingredients (with quantities when available), cooking directions, "
+        "and nutritional information (macros) if present.\n\n"
         "Rules:\n"
-        "- Return ONLY a JSON object with two keys: \"ingredients\" and \"directions\"\n"
+        "- Return ONLY a JSON object with three keys: \"ingredients\", \"directions\", and \"nutritional_info\"\n"
         "- \"ingredients\" is a list of strings, each a single ingredient with quantity and unit "
         "(e.g. \"1 cup flour\", \"2 cloves garlic, minced\")\n"
         "- \"directions\" is a list of strings, each a single cooking step in imperative form "
         "(e.g. \"Sauté the onion until translucent\", \"Preheat oven to 350°F\")\n"
-        "- Ignore commentary, opinions, nutrition info, and non-recipe content\n"
+        "- \"nutritional_info\" is an object with string keys and values for any macros/nutrition data "
+        "mentioned (e.g. {\"calories\": \"420\", \"protein\": \"57g\", \"fat\": \"15g\", \"carbs\": \"20g\", \"servings\": \"10\"}). "
+        "Set to null if no nutritional info is present.\n"
+        "- ONLY extract ingredients and directions that are EXPLICITLY written in the description. "
+        "Do NOT infer, guess, or generate a recipe from just a title or topic.\n"
+        "- If the description does not contain an actual ingredient list or cooking steps, "
+        "return empty arrays for ingredients and directions.\n"
+        "- Ignore commentary, opinions, and non-recipe content\n"
         "- Do NOT wrap the JSON in markdown code fences\n\n"
         f"Video description:\n{description}\n\n"
         "JSON:"
@@ -482,10 +502,19 @@ def llm_extract_from_description(
 
     ing_lines = data.get("ingredients", [])
     dir_lines = data.get("directions", [])
+    nutritional_info = data.get("nutritional_info")
 
-    if len(ing_lines) >= 2 and len(dir_lines) >= 1:
-        return ing_lines, dir_lines
-    return None
+    if len(ing_lines) < 2 or len(dir_lines) < 1:
+        return None
+
+    # Reject hallucinated recipes: if most ingredients lack quantities,
+    # the LLM likely invented them from just a title/topic.
+    qty_pattern = re.compile(r"\d")
+    with_qty = sum(1 for ing in ing_lines if qty_pattern.search(ing))
+    if with_qty < len(ing_lines) * 0.5:
+        return None
+
+    return ing_lines, dir_lines, nutritional_info
 
 
 # -----------------------------
@@ -606,7 +635,7 @@ def parse_ingredient(line: str) -> Ingredient:
     if m:
         qty = m.group("qty")
         unit = (m.group("unit") or "").strip() or None
-        rest = s[m.end():].strip(",;-: \\t")
+        rest = s[m.end():].strip(",;-: \t")
     item = rest
     notes = None
     if "(" in rest and ")" in rest:
@@ -799,7 +828,7 @@ def combine_sources(
     ocr_lines: List[str],
     use_local: Optional[bool] = None,
     llm_model: Optional[str] = None,
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], Optional[Dict[str, str]]]:
     # If LLM mode requested, delegate to llm_extract_recipe
     if use_local is not None and llm_model:
         return llm_extract_recipe(description, transcript, ocr_lines, use_local, llm_model)
@@ -898,7 +927,7 @@ def combine_sources(
                 seen_dirs.add(key)
                 dir_lines.append(direction)
 
-    return ing_lines, dir_lines
+    return ing_lines, dir_lines, None
 
 # -----------------------------
 # Cleanup / Normalization (deterministic, no external APIs)
@@ -1150,7 +1179,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
                 vlog(f"[green]Description-first extraction found {len(desc_result[0])} ingredients, {len(desc_result[1])} directions.")
 
         if desc_result is not None:
-            ing_lines, dir_lines = desc_result
+            ing_lines, dir_lines, nutritional_info = desc_result
             transcript = ""
             ocr_lines: List[str] = []
             console.log("[green]Recipe extracted from description — skipping video transcription/OCR.")
@@ -1162,7 +1191,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
             ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
             vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
             vlog("[cyan]Combining sources…")
-            ing_lines, dir_lines = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+            ing_lines, dir_lines, nutritional_info = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
 
         vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
         ingredients = [parse_ingredient(l) for l in ing_lines]
@@ -1174,6 +1203,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
             url=url,
             ingredients=ingredients,
             directions=_process_directions(dir_lines, args.cleanup),
+            nutritional_info=nutritional_info,
             extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
             raw_sources={"description": description[:DESC_TRUNCATE_LIMIT], "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
             model=llm_model,
@@ -1197,7 +1227,7 @@ def process_local(video_file: str, args) -> RecipeOutput:
     llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
     vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
     vlog("[cyan]Combining sources…")
-    ing_lines, dir_lines = combine_sources("", transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
+    ing_lines, dir_lines, nutritional_info = combine_sources("", transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
     vlog(f"[cyan]Extracted {len(ing_lines)} ingredient lines, {len(dir_lines)} direction lines.")
     ingredients = [parse_ingredient(l) for l in ing_lines]
     if args.cleanup:
@@ -1208,6 +1238,7 @@ def process_local(video_file: str, args) -> RecipeOutput:
         url=None,
         ingredients=ingredients,
         directions=_process_directions(dir_lines, args.cleanup),
+        nutritional_info=nutritional_info,
         extras={"ocr_samples": ocr_lines[:OCR_SAMPLE_LIMIT]},
         raw_sources={"description": "", "transcript": transcript[:TRANSCRIPT_TRUNCATE_LIMIT]},
         model=llm_model,
@@ -1242,6 +1273,11 @@ def save_outputs(out: RecipeOutput, outdir: Path) -> Tuple[Path, Path]:
             md.append(f"- {ing.quantity + ' ' if ing.quantity else ''}{(ing.unit + ' ') if ing.unit else ''}{ing.item or ing.original}")
     else:
         md.append("_None detected_")
+    if out.nutritional_info:
+        md.append("")
+        md.append("## Nutrition")
+        for key, val in out.nutritional_info.items():
+            md.append(f"- **{key.replace('_', ' ').title()}:** {val}")
     md.append("")
     md.append("## Directions")
     if out.directions:
@@ -1300,6 +1336,9 @@ def pretty_print(out: RecipeOutput):
     else:
         dir_txt = "None"
     table.add_row("Directions", dir_txt)
+    if out.nutritional_info:
+        macro_txt = "\n".join(f"- {k.replace('_', ' ').title()}: {v}" for k, v in out.nutritional_info.items())
+        table.add_row("Nutrition", macro_txt)
     if out.warnings:
         warn_txt = "\n".join(f"- {w}" for w in out.warnings)
         table.add_row("Warnings", warn_txt, style="yellow")
