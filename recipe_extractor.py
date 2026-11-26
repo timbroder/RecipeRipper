@@ -215,7 +215,12 @@ def transcribe(video_path: Path, model_size: str="small", language: Optional[str
 # -----------------------------
 def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: int=180) -> List[str]:
     import cv2
-    from paddleocr import PaddleOCR
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError:
+        console.print("[yellow]PaddleOCR is not installed; skipping on-screen text OCR. "
+                      "(PaddlePaddle has no Python 3.14 wheels yet; see docs/python-3.14.md.)")
+        return []
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
