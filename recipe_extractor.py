@@ -59,6 +59,15 @@ class RecipeOutput(BaseModel):
 
 TIMEOUT = 60 * 60  # 1 hour
 
+# yt-dlp format: best MP4 video up to 1080p plus m4a audio (ffmpeg merges them into an MP4),
+# then any video+audio pair, then the best single file with audio, and only as a last resort
+# video-only (OCR still works). The old "mp4[height<=1080]/mp4/best" picked video-only DASH
+# streams, so those downloads had no audio and produced empty transcripts.
+YTDLP_FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b/bv*"
+# Written into cached .info.json files so video-only downloads made with an older selector
+# can be detected and fetched again.
+YTDLP_FORMAT_KEY = "recipe_ripper_format"
+
 # OCR processing constants
 OCR_SCALE_THRESHOLD = 720
 OCR_UPSCALE_FACTOR = 1.25
@@ -123,6 +132,11 @@ def get_youtube_video_id(url: str) -> Optional[str]:
             return m.group(1)
     return None
 
+def cached_download_is_stale(info: Optional[dict]) -> bool:
+    """True when a cached download is known to lack audio and was made with an older format selector."""
+    return bool(info) and info.get("acodec") == "none" and info.get(YTDLP_FORMAT_KEY) != YTDLP_FORMAT
+
+
 def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
     """Download YouTube video, using cache if available. Cache is always local to the project directory."""
     script_dir = Path(__file__).parent.resolve()
@@ -143,7 +157,11 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
                     except (json.JSONDecodeError, OSError):
                         cached_info = None
                 break
-    if cached_video:
+    stale_cache = None
+    if cached_video and cached_download_is_stale(cached_info):
+        console.print("[yellow]Cached download has no audio track; downloading again with audio.")
+        stale_cache = (cached_video, cached_info or {})
+    elif cached_video:
         return cached_video, cached_info or {}
     # Not cached, download
     from yt_dlp import YoutubeDL
@@ -151,7 +169,8 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
     info_json: dict = {}
     ydl_opts = {
         "outtmpl": str(ytdlp_out),
-        "format": "mp4[height<=1080]/mp4/best",
+        "format": YTDLP_FORMAT,
+        "merge_output_format": "mp4",
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "en.*", "en-US"],
@@ -159,12 +178,14 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "ignoreerrors": True,
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if not info:
-            return None, {}
+            # A video-only cached copy still beats failing the whole run (OCR can work without audio).
+            return stale_cache if stale_cache else (None, {})
         vid = None
         if "requested_downloads" in info and info["requested_downloads"]:
             entry = info["requested_downloads"][0]
@@ -182,7 +203,8 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
             for p in tmpdir.glob("*.info.json"):
                 try:
                     info_json = json.loads(p.read_text())
-                    (cache_dir / f"{vid_id}.info.json").write_text(p.read_text())
+                    info_json[YTDLP_FORMAT_KEY] = YTDLP_FORMAT
+                    (cache_dir / f"{vid_id}.info.json").write_text(json.dumps(info_json))
                     break
                 except (json.JSONDecodeError, OSError):
                     pass
