@@ -1617,3 +1617,18 @@ def test_cross_reference_promotes_missing_ingredients():
     added_items = [ing.item for ing in recipe.ingredients[original_count:]]
     assert "butter" in added_items
 
+
+def test_faster_whisper_can_decode_audio_with_installed_pyav(tmp_path):
+    """Guards the av<19 pin: faster-whisper 1.2.1 calls av.open(metadata_errors=...)."""
+    import wave
+
+    audio = pytest.importorskip("faster_whisper.audio")
+    wav_path = tmp_path / "silence.wav"
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * 1600)
+
+    samples = audio.decode_audio(str(wav_path), sampling_rate=16000)
+    assert len(samples) == 1600
