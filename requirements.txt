@@ -1,5 +1,8 @@
 yt-dlp
 faster-whisper
+# faster-whisper 1.2.1 passes metadata_errors= to av.open(), which PyAV 19 removed.
+# Fixed upstream in SYSTRAN/faster-whisper#1495; drop this pin once a release after 1.2.1 ships.
+av<19
 # PaddlePaddle does not publish cp314 wheels yet; OCR is skipped on Python 3.14. See docs/python-3.14.md.
 paddleocr; python_version < "3.14"
 paddlepaddle; python_version < "3.14"
