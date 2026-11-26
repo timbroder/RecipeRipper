@@ -2,3 +2,7 @@
 
 .idea
 __pycache__/
+.venv
+output
+.env
+output_test

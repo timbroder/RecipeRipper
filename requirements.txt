@@ -1,11 +1,14 @@
 yt-dlp
 faster-whisper
-# PaddlePaddle does not yet publish cp314 wheels; see docs/python-3.14.md for manual install steps on Python 3.14.
-paddleocr==2.8.1; python_version < "3.14"
-opencv-python==4.10.0.84
-numpy==1.26.4
-pydantic==2.8.2
-rich==13.7.1
-tqdm==4.66.5
-pytest==8.3.2
-pytest-cov==5.0.0
+# PaddlePaddle does not publish cp314 wheels yet; OCR is skipped on Python 3.14. See docs/python-3.14.md.
+paddleocr; python_version < "3.14"
+paddlepaddle; python_version < "3.14"
+opencv-python
+numpy
+pydantic
+rich
+tqdm
+openai
+python-dotenv
+pytest
+pytest-cov
