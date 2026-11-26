@@ -178,6 +178,125 @@ def test_download_youtube_no_info(tmp_path, monkeypatch):
     assert info == {}
 
 
+def _fake_ydl(vid_id, calls, info_extra=None, fail=False):
+    """yt-dlp stand-in that records its options and 'downloads' an mp4 plus info.json."""
+    class DummyYDL:
+        def __init__(self, opts):
+            calls.append(opts)
+            self.output_dir = Path(opts["outtmpl"]).parent
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download):
+            if fail:
+                return None
+            video_path = self.output_dir / f"{vid_id}.mp4"
+            video_path.write_bytes(b"video+audio")
+            info = {"title": "Fresh", "acodec": "mp4a.40.2", **(info_extra or {})}
+            (self.output_dir / f"{vid_id}.info.json").write_text(json.dumps(info))
+            return {"requested_downloads": [{"filepath": str(video_path)}]}
+
+    return DummyYDL
+
+
+def _write_cache(vid_id, info):
+    cache_dir = Path(rex.__file__).parent / ".cache"
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / f"{vid_id}.mp4").write_bytes(b"video-only")
+    (cache_dir / f"{vid_id}.info.json").write_text(json.dumps(info))
+    return cache_dir
+
+
+def _clear_cache(cache_dir, vid_id):
+    for f in cache_dir.glob(f"{vid_id}.*"):
+        f.unlink()
+
+
+def test_download_youtube_requests_audio_and_records_format(tmp_path, monkeypatch):
+    vid_id = "fmtaudio001"
+    calls = []
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.Mock(YoutubeDL=_fake_ydl(vid_id, calls)))
+    cache_dir = Path(rex.__file__).parent / ".cache"
+    try:
+        rex.download_youtube(f"https://youtu.be/{vid_id}", tmp_path)
+        assert calls[0]["format"] == rex.YTDLP_FORMAT
+        assert calls[0]["merge_output_format"] == "mp4"
+        cached_info = json.loads((cache_dir / f"{vid_id}.info.json").read_text())
+        assert cached_info[rex.YTDLP_FORMAT_KEY] == rex.YTDLP_FORMAT
+    finally:
+        _clear_cache(cache_dir, vid_id)
+
+
+def test_download_youtube_refreshes_stale_video_only_cache(tmp_path, monkeypatch):
+    vid_id = "staleonly01"
+    cache_dir = _write_cache(vid_id, {"title": "Old", "acodec": "none"})
+    calls = []
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.Mock(YoutubeDL=_fake_ydl(vid_id, calls)))
+    try:
+        video_path, info = rex.download_youtube(f"https://youtu.be/{vid_id}", tmp_path)
+        assert len(calls) == 1
+        assert info["title"] == "Fresh"
+        assert video_path.read_bytes() == b"video+audio"
+    finally:
+        _clear_cache(cache_dir, vid_id)
+
+
+def test_download_youtube_keeps_video_only_cache_from_current_format(tmp_path, monkeypatch):
+    # Downloaded with today's selector and still no audio: the video has none, so don't refetch every run.
+    vid_id = "noaudiovid1"
+    cache_dir = _write_cache(vid_id, {"title": "Silent", "acodec": "none", rex.YTDLP_FORMAT_KEY: rex.YTDLP_FORMAT})
+    calls = []
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.Mock(YoutubeDL=_fake_ydl(vid_id, calls)))
+    try:
+        video_path, info = rex.download_youtube(f"https://youtu.be/{vid_id}", tmp_path)
+        assert calls == []
+        assert info["title"] == "Silent"
+    finally:
+        _clear_cache(cache_dir, vid_id)
+
+
+def test_download_youtube_falls_back_to_stale_cache_when_refresh_fails(tmp_path, monkeypatch):
+    vid_id = "stalefail01"
+    cache_dir = _write_cache(vid_id, {"title": "Old", "acodec": "none"})
+    calls = []
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.Mock(YoutubeDL=_fake_ydl(vid_id, calls, fail=True)))
+    try:
+        video_path, info = rex.download_youtube(f"https://youtu.be/{vid_id}", tmp_path)
+        assert len(calls) == 1
+        assert video_path == cache_dir / f"{vid_id}.mp4"
+        assert info["title"] == "Old"
+    finally:
+        _clear_cache(cache_dir, vid_id)
+
+
+def test_ytdlp_format_prefers_audio_and_falls_back_to_video_only():
+    """Runs yt-dlp's real format selector offline on fake format lists."""
+    yt_dlp = pytest.importorskip("yt_dlp")
+
+    def fmt(fid, ext, vcodec, acodec, height=None):
+        return {"format_id": fid, "ext": ext, "vcodec": vcodec, "acodec": acodec, "height": height,
+                "url": f"https://example.invalid/{fid}", "protocol": "https"}
+
+    def pick(formats):
+        info = {"id": "x", "title": "t", "extractor": "fake", "extractor_key": "Fake",
+                "webpage_url": "https://example.invalid", "formats": formats}
+        opts = {"format": rex.YTDLP_FORMAT, "merge_output_format": "mp4", "quiet": True, "simulate": True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.process_ie_result(info, download=False)["format_id"]
+
+    # YouTube Shorts today: separate DASH video and audio. The old selector took 788 alone (no audio).
+    assert pick([fmt("788", "mp4", "av01", "none", 1080), fmt("399", "mp4", "av01", "none", 1920),
+                 fmt("140", "m4a", "none", "mp4a.40.2"), fmt("251", "webm", "none", "opus")]) == "788+140"
+    assert pick([fmt("248", "webm", "vp9", "none", 1080), fmt("251", "webm", "none", "opus")]) == "248+251"
+    assert pick([fmt("18", "mp4", "avc1", "mp4a.40.2", 360)]) == "18"
+    # No audio offered at all: still download the best video so OCR can run.
+    assert pick([fmt("231", "mp4", "avc1", "none", 480), fmt("232", "mp4", "avc1", "none", 720)]) == "232"
+
+
 def test_transcribe(monkeypatch, tmp_path):
     segments = [SimpleNamespace(text=" Step 1"), SimpleNamespace(text="Step 2 ")]
     created = []
