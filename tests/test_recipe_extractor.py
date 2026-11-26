@@ -299,18 +299,127 @@ def test_ytdlp_format_prefers_audio_and_falls_back_to_video_only():
 
 def test_transcribe(monkeypatch, tmp_path):
     segments = [SimpleNamespace(text=" Step 1"), SimpleNamespace(text="Step 2 ")]
+    created = []
 
     class DummyModel:
         def __init__(self, *a, **k):
-            pass
+            created.append(k)
 
         def transcribe(self, path, beam_size, language):
             return segments, SimpleNamespace()
 
     monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 0))
 
     transcript = rex.transcribe(tmp_path / "video.mp4")
     assert transcript == "Step 1 Step 2"
+    assert created == [{"device": "cpu", "compute_type": "int8"}]
+
+
+
+def test_transcribe_skips_video_without_audio(monkeypatch, tmp_path):
+    def fail_model(*a, **k):
+        raise AssertionError("model should not load for a silent video")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=fail_model))
+    monkeypatch.setattr(rex, "has_audio_stream", lambda path: False)
+
+    assert rex.transcribe(tmp_path / "video.mp4") == ""
+
+
+def test_has_audio_stream(monkeypatch, tmp_path):
+    class FakeContainer:
+        def __init__(self, audio):
+            self.streams = SimpleNamespace(audio=audio)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer([])))
+    assert rex.has_audio_stream(tmp_path / "video_only.mp4") is False
+
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer(["aac"])))
+    assert rex.has_audio_stream(tmp_path / "with_audio.mp4") is True
+
+    def broken_open(path):
+        raise OSError("unreadable")
+
+    # Unknown -> True, so faster-whisper reports the real error instead of silently skipping.
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=broken_open))
+    assert rex.has_audio_stream(tmp_path / "corrupt.mp4") is True
+
+def test_resolve_asr_device(monkeypatch):
+    assert rex.resolve_asr_device("cpu") == ("cpu", "int8")
+    assert rex.resolve_asr_device("mps") == ("mps", "float16")
+
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 1))
+    assert rex.resolve_asr_device("auto") == ("mps", "float16")
+
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 0))
+    assert rex.resolve_asr_device("auto") == ("cpu", "int8")
+
+    # Older ctranslate2 builds have no MPS support at all.
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace())
+    assert rex.resolve_asr_device("auto") == ("cpu", "int8")
+
+
+def test_transcribe_falls_back_to_cpu_when_mps_fails(monkeypatch, tmp_path):
+    devices = []
+
+    class DummyModel:
+        def __init__(self, *a, device, compute_type):
+            devices.append(device)
+            self.device = device
+
+        def transcribe(self, path, beam_size, language):
+            if self.device == "mps":
+                raise RuntimeError("Metal kernel failed")
+            return [SimpleNamespace(text="Whisk eggs")], SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+
+    assert rex.transcribe(tmp_path / "video.mp4", device="mps") == "Whisk eggs"
+    assert devices == ["mps", "cpu"]
+
+
+def test_transcribe_cpu_failure_is_not_swallowed(monkeypatch, tmp_path):
+    class DummyModel:
+        def __init__(self, *a, **k):
+            raise RuntimeError("model missing")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+
+    with pytest.raises(RuntimeError, match="model missing"):
+        rex.transcribe(tmp_path / "video.mp4", device="cpu")
+
+
+def test_transcribe_and_ocr_runs_both_stages_concurrently(monkeypatch, tmp_path):
+    import threading
+
+    # Each stage waits for the other to start; run back to back, the barrier times out.
+    both_running = threading.Barrier(2, timeout=5)
+    calls = {}
+
+    def fake_transcribe(path, model_size, language, device):
+        calls["transcribe"] = (path, model_size, language, device)
+        both_running.wait()
+        return "Chop onions"
+
+    def fake_ocr(path, seconds_between, max_frames):
+        calls["ocr"] = (path, seconds_between, max_frames)
+        both_running.wait()
+        return ["1 onion"]
+
+    monkeypatch.setattr(rex, "transcribe", fake_transcribe)
+    monkeypatch.setattr(rex, "ocr_onscreen_text", fake_ocr)
+    args = SimpleNamespace(model="base", language="en", fps_sample=0.5, max_frames=12, asr_device="cpu")
+    video = tmp_path / "v.mp4"
+
+    assert rex.transcribe_and_ocr(video, args) == ("Chop onions", ["1 onion"])
+    assert calls == {"transcribe": (video, "base", "en", "cpu"), "ocr": (video, 0.5, 12)}
 
 
 class DummyCapture:
@@ -352,12 +461,12 @@ def test_ocr_onscreen_text(monkeypatch):
         return frame
 
     class DummyOCR:
-        def __init__(self, *a, **k):
-            pass
+        def __init__(self, *a, params=None, **k):
+            ocr_calls.append(("init", params))
 
-        def predict(self, frame):
-            ocr_calls.append("predict")
-            return [{'rec_texts': ['Ingredient'], 'rec_scores': [0.9]}]
+        def __call__(self, frame):
+            ocr_calls.append("call")
+            return SimpleNamespace(txts=("Ingredient", " x "), scores=(0.9, 0.8))
 
     dummy_cv2 = mock.Mock(
         VideoCapture=DummyCapture,
@@ -368,20 +477,37 @@ def test_ocr_onscreen_text(monkeypatch):
     )
 
     monkeypatch.setitem(sys.modules, "cv2", dummy_cv2)
-    monkeypatch.setitem(sys.modules, "paddleocr", mock.Mock(PaddleOCR=DummyOCR))
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
 
     lines = rex.ocr_onscreen_text(Path("dummy.mp4"), seconds_between=0.1, max_frames=2)
     assert lines == ["Ingredient"]
-    assert ocr_calls
+    assert ocr_calls[0] == ("init", {"Global.log_level": "error", "Global.text_score": rex.OCR_MIN_SCORE})
+    # 3 frames at 30 fps sampled every 0.1s -> every 3rd frame -> one OCR call.
+    assert ocr_calls.count("call") == 1
 
 
-def test_ocr_skips_when_paddleocr_missing(monkeypatch):
+def test_ocr_handles_frames_with_no_text(monkeypatch):
+    class DummyOCR:
+        def __init__(self, *a, **k):
+            pass
+
+        def __call__(self, frame):
+            return SimpleNamespace(txts=None, scores=None)
+
+    dummy_cv2 = mock.Mock(VideoCapture=DummyCapture, CAP_PROP_FPS=5, resize=lambda f, s, interpolation: f, INTER_CUBIC=0)
+    monkeypatch.setitem(sys.modules, "cv2", dummy_cv2)
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
+
+    assert rex.ocr_onscreen_text(Path("dummy.mp4"), seconds_between=0.1, max_frames=2) == []
+
+
+def test_ocr_skips_when_rapidocr_missing(monkeypatch):
     def fail_capture(*a, **k):
-        raise AssertionError("video should not be opened when PaddleOCR is unavailable")
+        raise AssertionError("video should not be opened when RapidOCR is unavailable")
 
     monkeypatch.setitem(sys.modules, "cv2", mock.Mock(VideoCapture=fail_capture))
-    # A None entry in sys.modules makes `import paddleocr` raise ImportError.
-    monkeypatch.setitem(sys.modules, "paddleocr", None)
+    # A None entry in sys.modules makes `import rapidocr` raise ImportError.
+    monkeypatch.setitem(sys.modules, "rapidocr", None)
 
     assert rex.ocr_onscreen_text(Path("dummy.mp4")) == []
 
@@ -430,13 +556,14 @@ def test_parsing_helpers(monkeypatch):
     assert "1 cup sugar" in ings
     assert "Random note" in other
 
-    ing_lines, dir_lines = rex.combine_sources(
+    ing_lines, dir_lines, nutritional_info = rex.combine_sources(
         "1 cup sugar. Stir well.",
         "Bake for 10 minutes.",
         ["Sprinkle nuts"],
     )
     assert isinstance(ing_lines, list)
     assert isinstance(dir_lines, list)
+    assert nutritional_info is None
 
 
 def test_cleaning_helpers(monkeypatch):
@@ -485,7 +612,7 @@ def test_process_youtube(monkeypatch, tmp_path):
     monkeypatch.setattr(rex, "llm_extract_from_description", lambda *a, **k: None)
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Mix well")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 cup sugar"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"], None))
     original_sub = rex.re.sub
 
     def safe_sub(pattern, repl, string, count=0, flags=0):
@@ -519,7 +646,7 @@ def test_process_local_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(rex, "transcribe", lambda *a, **k: "Chop onions")
     monkeypatch.setattr(rex, "ocr_onscreen_text", lambda *a, **k: ["1 onion"])
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 onion"], ["Chop onions"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 onion"], ["Chop onions"], None))
 
     result = rex.process_local(str(video_file), args)
     assert result.title == "local"
@@ -590,7 +717,7 @@ def test_preload_models(monkeypatch):
 
     monkeypatch.setattr(rex, "Progress", DummyProgress)
     monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=lambda *a, **k: DummyWhisper()))
-    monkeypatch.setitem(sys.modules, "paddleocr", mock.Mock(PaddleOCR=DummyOCR))
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
     
     class DummyArray:
         def __mul__(self, other):
@@ -766,7 +893,7 @@ def test_llm_extract_recipe_openai(monkeypatch):
 
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="A simple cake recipe",
         transcript="First preheat the oven. Mix the dry ingredients.",
         ocr_lines=["1 cup flour", "2 eggs"],
@@ -775,6 +902,7 @@ def test_llm_extract_recipe_openai(monkeypatch):
     )
     assert ing == ["1 cup flour", "2 eggs", "1/2 cup milk"]
     assert dirs == ["Preheat oven to 350°F", "Mix dry ingredients", "Bake for 25 minutes"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_local(monkeypatch):
@@ -787,7 +915,7 @@ def test_llm_extract_recipe_local(monkeypatch):
     monkeypatch.setattr(rex, "ensure_local_model", lambda model: None)
     monkeypatch.setattr(rex, "ask_local_model", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="Mince the garlic cloves",
         ocr_lines=[],
@@ -796,6 +924,7 @@ def test_llm_extract_recipe_local(monkeypatch):
     )
     assert ing == ["2 cloves garlic"]
     assert dirs == ["Mince the garlic"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_with_code_fences(monkeypatch):
@@ -804,7 +933,7 @@ def test_llm_extract_recipe_with_code_fences(monkeypatch):
 
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_response)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="Stir sugar well",
         ocr_lines=[],
@@ -813,6 +942,7 @@ def test_llm_extract_recipe_with_code_fences(monkeypatch):
     )
     assert ing == ["1 cup sugar"]
     assert dirs == ["Stir well"]
+    assert nutritional_info is None
 
 
 def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
@@ -824,12 +954,12 @@ def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
 
     def mock_combine(desc, trans, ocr, use_local=None, llm_model=None):
         if use_local is None and llm_model is None:
-            return (["fallback ingredient"], ["fallback direction"])
+            return (["fallback ingredient"], ["fallback direction"], None)
         return original_combine(desc, trans, ocr, use_local=use_local, llm_model=llm_model)
 
     monkeypatch.setattr(rex, "combine_sources", mock_combine)
 
-    ing, dirs = rex.llm_extract_recipe(
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
         description="",
         transcript="fallback test",
         ocr_lines=[],
@@ -838,6 +968,7 @@ def test_llm_extract_recipe_invalid_json_fallback(monkeypatch):
     )
     assert ing == ["fallback ingredient"]
     assert dirs == ["fallback direction"]
+    assert nutritional_info is None
 
 
 def test_ensure_local_model_already_present(monkeypatch):
@@ -1003,10 +1134,11 @@ def test_combine_sources_with_llm(monkeypatch):
     llm_json = json.dumps({
         "ingredients": ["1 lb chicken"],
         "directions": ["Grill the chicken"],
+        "nutritional_info": {"calories": "300", "protein": "40g"},
     })
     monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
 
-    ing, dirs = rex.combine_sources(
+    ing, dirs, nutritional_info = rex.combine_sources(
         description="Grilled chicken recipe",
         transcript="Grill the chicken for 10 minutes",
         ocr_lines=["1 lb chicken"],
@@ -1015,11 +1147,12 @@ def test_combine_sources_with_llm(monkeypatch):
     )
     assert ing == ["1 lb chicken"]
     assert dirs == ["Grill the chicken"]
+    assert nutritional_info == {"calories": "300", "protein": "40g"}
 
 
 def test_combine_sources_without_llm():
     """Test that combine_sources falls back to heuristic when no LLM params."""
-    ing, dirs = rex.combine_sources(
+    ing, dirs, nutritional_info = rex.combine_sources(
         description="1 cup sugar. Stir well.",
         transcript="Bake for 10 minutes.",
         ocr_lines=["Sprinkle nuts"],
@@ -1028,11 +1161,115 @@ def test_combine_sources_without_llm():
     # just verify it returns the right shape)
     assert isinstance(ing, list)
     assert isinstance(dirs, list)
+    assert nutritional_info is None
+
+
+def test_llm_extract_recipe_with_nutritional_info(monkeypatch):
+    """Test that nutritional_info is extracted when present in LLM response."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs"],
+        "directions": ["Cook the beef", "Scramble the eggs"],
+        "nutritional_info": {"calories": "420", "protein": "57g", "fat": "15g", "carbs": "20g", "servings": "10"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    ing, dirs, nutritional_info = rex.llm_extract_recipe(
+        description="420 calories 57g protein",
+        transcript="Cook the beef",
+        ocr_lines=[],
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert nutritional_info == {"calories": "420", "protein": "57g", "fat": "15g", "carbs": "20g", "servings": "10"}
+
+
+def test_llm_extract_from_description_with_nutritional_info(monkeypatch):
+    """Test that nutritional_info is extracted from description-first path."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs"],
+        "directions": ["Cook the beef"],
+        "nutritional_info": {"calories": "420", "protein": "57g"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="420 calories 57g protein\n3 lbs beef\n10 eggs\nCook the beef",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs, nutritional_info = result
+    assert nutritional_info == {"calories": "420", "protein": "57g"}
+
+
+def test_save_outputs_includes_nutrition(tmp_path):
+    """Test that nutritional_info appears in the markdown output."""
+    out = rex.RecipeOutput(
+        title="Test Recipe",
+        ingredients=[rex.Ingredient(original="1 cup flour", item="flour")],
+        directions=["Mix well"],
+        nutritional_info={"calories": "420", "protein": "57g", "fat": "15g"},
+    )
+    _, md_path = rex.save_outputs(out, tmp_path)
+    md_content = md_path.read_text()
+    assert "## Nutrition" in md_content
+    assert "**Calories:** 420" in md_content
+    assert "**Protein:** 57g" in md_content
+    assert "**Fat:** 15g" in md_content
+
+
+def test_save_outputs_no_nutrition_section_when_none(tmp_path):
+    """Test that Nutrition section is omitted when nutritional_info is None."""
+    out = rex.RecipeOutput(
+        title="Test Recipe",
+        ingredients=[rex.Ingredient(original="1 cup flour", item="flour")],
+        directions=["Mix well"],
+    )
+    _, md_path = rex.save_outputs(out, tmp_path)
+    md_content = md_path.read_text()
+    assert "## Nutrition" not in md_content
 
 
 # -----------------------------
 # Description-first extraction tests
 # -----------------------------
+
+
+def test_llm_extract_from_description_rejects_hallucinated_recipe(monkeypatch):
+    """Description with no real recipe should return None even if LLM hallucinates."""
+    # LLM hallucinates ingredients without quantities from just a title
+    llm_json = json.dumps({
+        "ingredients": ["Chicken", "Bacon", "Rice"],
+        "directions": ["Cook the chicken", "Add the rice"],
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="Chicken Bacon Fried Rice\nPer Serving: 530 Calories, 56g Protein",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is None
+
+
+def test_llm_extract_from_description_accepts_real_recipe(monkeypatch):
+    """Description with real ingredients (quantities) should be accepted."""
+    llm_json = json.dumps({
+        "ingredients": ["3 lbs beef", "10 eggs", "1 pack bacon", "10 wraps"],
+        "directions": ["Cook the beef", "Cook the eggs", "Wrap everything"],
+        "nutritional_info": {"calories": "420", "protein": "57g"},
+    })
+    monkeypatch.setattr(rex, "ask_openai", lambda prompt, model: llm_json)
+
+    result = rex.llm_extract_from_description(
+        description="3lbs beef\n10 eggs\n1 pack bacon\n10 wraps\nCook the beef...",
+        use_local=False,
+        model="gpt-4o-mini",
+    )
+    assert result is not None
+    ing, dirs, nutritional_info = result
+    assert len(ing) == 4
+    assert nutritional_info == {"calories": "420", "protein": "57g"}
 
 
 def test_llm_extract_from_description_success(monkeypatch):
@@ -1049,9 +1286,10 @@ def test_llm_extract_from_description_success(monkeypatch):
         model="gpt-4o-mini",
     )
     assert result is not None
-    ing, dirs = result
+    ing, dirs, nutritional_info = result
     assert len(ing) == 3
     assert len(dirs) == 2
+    assert nutritional_info is None
 
 
 def test_llm_extract_from_description_incomplete(monkeypatch):
@@ -1098,7 +1336,7 @@ def test_process_youtube_skips_video_on_description_hit(monkeypatch, tmp_path):
     ))
 
     monkeypatch.setattr(rex, "llm_extract_from_description", lambda desc, use_local, model: (
-        ["1 cup flour", "2 eggs"], ["Preheat oven to 350°F"]
+        ["1 cup flour", "2 eggs"], ["Preheat oven to 350°F"], None
     ))
 
     transcribe_called = {"yes": False}
@@ -1148,7 +1386,7 @@ def test_process_youtube_falls_through_on_description_miss(monkeypatch, tmp_path
 
     monkeypatch.setattr(rex, "transcribe", fake_transcribe)
     monkeypatch.setattr(rex, "ocr_onscreen_text", fake_ocr)
-    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"]))
+    monkeypatch.setattr(rex, "combine_sources", lambda d, t, o, **kw: (["1 cup sugar"], ["Mix well"], None))
 
     result = rex.process_youtube("https://youtu.be/test", args)
     assert transcribe_called["yes"]
@@ -1527,6 +1765,63 @@ def test_dedup_still_removes_true_duplicates():
 # -----------------------------
 # Cross-reference false-positive & promotion tests
 # -----------------------------
+
+
+# -----------------------------
+# "Salt and pepper to taste" fix tests
+# -----------------------------
+
+
+def test_looks_like_ingredient_salt_and_pepper_to_taste():
+    """'salt and pepper to taste' should be recognized as an ingredient."""
+    assert rex.looks_like_ingredient("salt and pepper to taste")
+    assert rex.looks_like_ingredient("Salt and pepper to taste")
+    assert rex.looks_like_ingredient("salt to taste")
+    assert rex.looks_like_ingredient("pepper as needed")
+    assert rex.looks_like_ingredient("fresh garlic, optional")
+    assert rex.looks_like_ingredient("parsley for garnish")
+
+
+def test_looks_like_ingredient_still_rejects_non_food():
+    """Taste modifiers without food words should still be rejected."""
+    assert not rex.looks_like_ingredient("patience as needed")
+    assert not rex.looks_like_ingredient("love to taste")
+
+
+def test_extract_ingredients_preserves_to_taste():
+    """extract_ingredients_from_sentence should preserve 'to taste' qualifier."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper to taste")
+    assert any("to taste" in r.lower() for r in result)
+
+
+def test_extract_ingredients_salt_pepper_without_to_taste():
+    """Without 'to taste', should still extract 'Salt and pepper'."""
+    result = rex.extract_ingredients_from_sentence("add salt and pepper")
+    assert any("salt and pepper" in r.lower() for r in result)
+
+
+def test_dedup_does_not_eat_compound_ingredient():
+    """'salt and pepper' should not be deduped when only 'salt' was seen from another ingredient."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="I'm using a pinch of salt. Then add salt and pepper to taste.",
+        ocr_lines=[],
+    )
+    joined = " ".join(ing_lines).lower()
+    # "salt and pepper" should survive even though "salt" appeared separately
+    assert "pepper" in joined
+
+
+def test_dedup_still_removes_true_duplicates():
+    """A true duplicate (all food words already seen) should still be removed."""
+    ing_lines, _, _ = rex.combine_sources(
+        description="",
+        transcript="",
+        ocr_lines=["1 tsp salt", "salt"],
+    )
+    # "salt" alone (3 words or fewer, only food word is "salt") should be deduped
+    salt_count = sum(1 for l in ing_lines if l.strip().lower() == "salt")
+    assert salt_count == 0
 
 
 def test_extract_food_words_multi_word_suppresses_single():

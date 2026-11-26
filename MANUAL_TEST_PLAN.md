@@ -329,7 +329,7 @@
 | PRE-002 | Preload specific model | `--preload-models --model tiny` | tiny model downloaded | | |
 | PRE-003 | Preload with language | `--preload-models --language en` | Model + language data cached | | |
 | PRE-004 | Verify model cache | Check HF cache dir | Models present in cache | | |
-| PRE-005 | Verify OCR models | PaddleOCR models | OCR models downloaded | | |
+| PRE-005 | Verify OCR models | RapidOCR models | OCR models downloaded | | |
 
 ### 10.2 Offline Operation
 **Objective:** Verify operation without internet (simulated)

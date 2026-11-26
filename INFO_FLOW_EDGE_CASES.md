@@ -66,7 +66,8 @@ In all these cases, the pipeline proceeds to transcription + OCR + full extracti
 | Audio is silent or unintelligible | Whisper returns empty segments → empty transcript string |
 | Wrong language detected | May produce garbled text; use `--language` to force correct language |
 | Model not downloaded yet | faster-whisper auto-downloads on first use (or pre-download with `--preload-models`) |
-| Video has no audio track | Whisper receives silence → empty transcript |
+| Video has no audio track | `has_audio_stream()` detects it, transcription is skipped with a warning → empty transcript |
+| MPS (Apple Metal) backend fails | faster-whisper is retried once on CPU (int8) |
 | Very long video | No timeout on transcription itself; the `TIMEOUT` constant (1 hour) applies to subprocess calls, not Whisper directly |
 
 ### Stage 3: OCR
@@ -75,10 +76,11 @@ In all these cases, the pipeline proceeds to transcription + OCR + full extracti
 |-----------|----------|
 | No text on screen | OCR returns empty list → pipeline relies on transcript and description |
 | Low-resolution video | Frames below 720px height/width are upscaled by 1.25x before OCR |
-| Non-English text on screen | PaddleOCR is configured for English; non-English text may be garbled or missed |
+| Non-English text on screen | RapidOCR's default PP-OCR model reads Chinese and English; other scripts may be garbled or missed |
 | Very short video (<1 second) | May produce 0-1 frames → effectively no OCR data |
 | Video can't be opened by OpenCV | `cv2.VideoCapture` returns a capture object that reads no frames → empty OCR list |
-| PaddleOCR returns None for a frame | The code checks `result[0] is not None` before processing boxes |
+| RapidOCR finds no text in a frame | `result.txts` is `None`; treated as no lines |
+| RapidOCR not installed | Warning printed, OCR returns an empty list |
 
 ### Stage 4: LLM extraction
 

@@ -8,21 +8,21 @@ Extract structured **ingredients** and **directions** from a recipe video. It re
 
 1. **Download** the video and description (YouTube) or read from disk (local file)
 2. **Description-first check** — when LLM extraction is active, the description is sent to the LLM first. If it contains a complete recipe (at least 2 ingredients and 1 direction), transcription and OCR are skipped entirely.
-3. **Transcribe** speech with `faster-whisper` (local, no API keys)
-4. **OCR** on-screen text from sampled frames via `PaddleOCR`
+3. **Transcribe** speech with `faster-whisper` (local, no API keys; uses Apple Metal/MPS when available)
+4. **OCR** on-screen text from sampled frames via `RapidOCR` (PaddleOCR's PP-OCR models on ONNX Runtime). Transcription and OCR run in parallel.
 5. **Extract** ingredients and directions using an LLM (OpenAI or Ollama), with a heuristic fallback
 6. **Cleanup** (optional) — normalize units, deduplicate ingredients, tidy directions
 7. **Output** `recipe.json` (structured) and `recipe.md` (human-readable)
 
 ## Requirements
 
-- Python 3.10+ (on-screen OCR needs 3.10–3.13; see the Python 3.14 note below)
+- Python 3.10+
 - `ffmpeg`
 - **OpenAI API key** (for default LLM extraction) _or_ a running **Ollama** instance (for local extraction)
 
 ## Installation
 
-> **Python 3.14:** PaddlePaddle does not publish Python 3.14 wheels yet, so `requirements.txt` skips `paddleocr`/`paddlepaddle` on 3.14 and on-screen text OCR is disabled (description and speech still work). Use Python 3.10–3.13 for the full pipeline. See [docs/python-3.14.md](docs/python-3.14.md).
+> **Upgrading an existing venv from PaddleOCR?** Run `pip uninstall -y opencv-python paddleocr paddlepaddle paddlex` first. RapidOCR uses `opencv-python-headless`, and both OpenCV packages install into the same `cv2` folder.
 
 ```bash
 python -m venv .venv
@@ -64,6 +64,7 @@ python recipe_extractor.py --youtube "https://www.youtube.com/shorts/XXXXX" --cl
 | `--video` | string | — | Path to a local video file. Mutually exclusive with `--youtube`. |
 | `--language` | string | auto-detect | Language hint for transcription (e.g. `en`, `es`, `fr`) |
 | `--model` | string | `small` | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `--asr-device` | string | `auto` | faster-whisper device: `auto` (Apple Metal/MPS when available, else CPU), `cpu`, or `mps` |
 | `--fps-sample` | float | `0.6` | Seconds between OCR frames |
 | `--max-frames` | int | `180` | Maximum number of frames to OCR |
 | `--outdir` | string | `output` | Directory for `recipe.json` and `recipe.md` |
