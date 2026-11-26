@@ -64,7 +64,7 @@ When neither `--use-local` is set nor `OPENAI_API_KEY` is available, the pipelin
 
 | Argument | Purpose |
 |----------|---------|
-| `--preload-models` | Download Whisper and PaddleOCR models for offline use |
+| `--preload-models` | Download Whisper and RapidOCR models for offline use |
 | `--list-models` | Show available Whisper model sizes with resource requirements |
 
 ---
@@ -99,14 +99,12 @@ When neither `--use-local` is set nor `OPENAI_API_KEY` is available, the pipelin
 
 faster-whisper models are cached by the library itself (typically in `~/.cache/huggingface/`). The `--preload-models` flag triggers an explicit download ahead of time.
 
-### PaddleOCR model cache
+### RapidOCR model cache
 
-PaddleOCR models are cached in `~/.paddlex/official_models/`. The `--preload-models` flag triggers download. Models include:
-- `PP-LCNet_x1_0_doc_ori` — document orientation
-- `UVDoc` — document unwarping
-- `PP-LCNet_x1_0_textline_ori` — text line orientation
-- `PP-OCRv5_server_det` — text detection
-- `en_PP-OCRv5_mobile_rec` — English text recognition
+RapidOCR downloads its ONNX models on first use into the installed package's `rapidocr/models/` folder. The `--preload-models` flag triggers the download. With rapidocr 3.10 the defaults are:
+- `PP-OCRv6_det_small` — text detection
+- `PP-OCRv6_rec_small` — text recognition
+- `ch_ppocr_mobile_v2.0_cls_mobile` — text direction classification
 
 ---
 
@@ -261,8 +259,8 @@ When `--publish` is passed, the Markdown file is uploaded to a public GitHub Gis
 |---------|---------|
 | `yt-dlp` | YouTube download |
 | `faster-whisper` | Speech transcription |
-| `paddleocr` + `paddlepaddle` | On-screen text OCR |
-| `opencv-python` | Video frame extraction |
+| `rapidocr` + `onnxruntime` | On-screen text OCR (PP-OCR models) |
+| `opencv-python-headless` | Video frame extraction |
 | `pydantic` | Data models and JSON serialization |
 | `rich` | Terminal output formatting |
 | `openai` | OpenAI API client |
@@ -274,7 +272,7 @@ When `--publish` is passed, the Markdown file is uploaded to a public GitHub Gis
 |----------------|-------------------------------------|
 | yt-dlp | `youtube_explode_dart`, or call yt-dlp as a subprocess |
 | faster-whisper | `whisper.cpp` via FFI, Google Speech-to-Text, or cloud API |
-| PaddleOCR | Google ML Kit Text Recognition, Tesseract via FFI |
+| RapidOCR | Google ML Kit Text Recognition, Tesseract via FFI |
 | OpenCV | `image` package for frame extraction, or FFmpeg via process |
 | Pydantic | Dart `json_serializable` / `freezed` for data models |
 | OpenAI SDK | `dart_openai` package or direct HTTP |

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RecipeRipper extracts structured ingredients and directions from recipe videos (YouTube or local files). It combines three text sources:
 1. Video description (YouTube only)
 2. Speech transcription via faster-whisper
-3. On-screen text via PaddleOCR
+3. On-screen text via RapidOCR (PaddleOCR's PP-OCR models on ONNX Runtime)
 
 ## Commands
 
@@ -43,7 +43,7 @@ The codebase is a single-file Python script (`recipe_extractor.py`) with the fol
 1. **Input**: YouTube URL or local video file
 2. **Download** (YouTube only): Uses yt-dlp with local caching in `.cache/`
 3. **Transcription**: faster-whisper ASR (CPU, int8 quantized)
-4. **OCR**: PaddleOCR on sampled video frames
+4. **OCR**: RapidOCR on sampled video frames (runs in parallel with transcription via `transcribe_and_ocr()`; faster-whisper uses MPS on Apple Silicon, see `--asr-device`)
 5. **Parsing**: LLM-based extraction (default) with heuristic fallback
    - LLM mode: Sends raw text to OpenAI (`--openai-model`, default `gpt-4o-mini`) or local Ollama (`--use-local`, `--local-model`)
    - Heuristic fallback: `looks_like_ingredient()` / `looks_like_direction()` regex-based classification
@@ -57,4 +57,4 @@ The codebase is a single-file Python script (`recipe_extractor.py`) with the fol
 
 ## Dependencies
 
-Requires Python 3.10+ and ffmpeg. Main libraries: yt-dlp, faster-whisper, paddleocr, paddlepaddle, opencv-python, pydantic, rich, openai.
+Requires Python 3.10+ and ffmpeg. Main libraries: yt-dlp, faster-whisper, rapidocr, onnxruntime, opencv-python-headless, pydantic, rich, openai.

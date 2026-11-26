@@ -3,10 +3,11 @@ faster-whisper
 # faster-whisper 1.2.1 passes metadata_errors= to av.open(), which PyAV 19 removed.
 # Fixed upstream in SYSTRAN/faster-whisper#1495; drop this pin once a release after 1.2.1 ships.
 av<19
-# PaddlePaddle does not publish cp314 wheels yet; OCR is skipped on Python 3.14. See docs/python-3.14.md.
-paddleocr; python_version < "3.14"
-paddlepaddle; python_version < "3.14"
-opencv-python
+# On-screen OCR: PaddleOCR's PP-OCR models run on ONNX Runtime (works on Python 3.14,
+# unlike paddlepaddle). rapidocr requires the headless OpenCV build; don't also install opencv-python.
+rapidocr
+onnxruntime
+opencv-python-headless
 numpy
 pydantic
 rich

@@ -180,18 +180,127 @@ def test_download_youtube_no_info(tmp_path, monkeypatch):
 
 def test_transcribe(monkeypatch, tmp_path):
     segments = [SimpleNamespace(text=" Step 1"), SimpleNamespace(text="Step 2 ")]
+    created = []
 
     class DummyModel:
         def __init__(self, *a, **k):
-            pass
+            created.append(k)
 
         def transcribe(self, path, beam_size, language):
             return segments, SimpleNamespace()
 
     monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 0))
 
     transcript = rex.transcribe(tmp_path / "video.mp4")
     assert transcript == "Step 1 Step 2"
+    assert created == [{"device": "cpu", "compute_type": "int8"}]
+
+
+
+def test_transcribe_skips_video_without_audio(monkeypatch, tmp_path):
+    def fail_model(*a, **k):
+        raise AssertionError("model should not load for a silent video")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=fail_model))
+    monkeypatch.setattr(rex, "has_audio_stream", lambda path: False)
+
+    assert rex.transcribe(tmp_path / "video.mp4") == ""
+
+
+def test_has_audio_stream(monkeypatch, tmp_path):
+    class FakeContainer:
+        def __init__(self, audio):
+            self.streams = SimpleNamespace(audio=audio)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer([])))
+    assert rex.has_audio_stream(tmp_path / "video_only.mp4") is False
+
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer(["aac"])))
+    assert rex.has_audio_stream(tmp_path / "with_audio.mp4") is True
+
+    def broken_open(path):
+        raise OSError("unreadable")
+
+    # Unknown -> True, so faster-whisper reports the real error instead of silently skipping.
+    monkeypatch.setitem(sys.modules, "av", SimpleNamespace(open=broken_open))
+    assert rex.has_audio_stream(tmp_path / "corrupt.mp4") is True
+
+def test_resolve_asr_device(monkeypatch):
+    assert rex.resolve_asr_device("cpu") == ("cpu", "int8")
+    assert rex.resolve_asr_device("mps") == ("mps", "float16")
+
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 1))
+    assert rex.resolve_asr_device("auto") == ("mps", "float16")
+
+    monkeypatch.setitem(sys.modules, "ctranslate2", mock.Mock(get_mps_device_count=lambda: 0))
+    assert rex.resolve_asr_device("auto") == ("cpu", "int8")
+
+    # Older ctranslate2 builds have no MPS support at all.
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace())
+    assert rex.resolve_asr_device("auto") == ("cpu", "int8")
+
+
+def test_transcribe_falls_back_to_cpu_when_mps_fails(monkeypatch, tmp_path):
+    devices = []
+
+    class DummyModel:
+        def __init__(self, *a, device, compute_type):
+            devices.append(device)
+            self.device = device
+
+        def transcribe(self, path, beam_size, language):
+            if self.device == "mps":
+                raise RuntimeError("Metal kernel failed")
+            return [SimpleNamespace(text="Whisk eggs")], SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+
+    assert rex.transcribe(tmp_path / "video.mp4", device="mps") == "Whisk eggs"
+    assert devices == ["mps", "cpu"]
+
+
+def test_transcribe_cpu_failure_is_not_swallowed(monkeypatch, tmp_path):
+    class DummyModel:
+        def __init__(self, *a, **k):
+            raise RuntimeError("model missing")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=DummyModel))
+
+    with pytest.raises(RuntimeError, match="model missing"):
+        rex.transcribe(tmp_path / "video.mp4", device="cpu")
+
+
+def test_transcribe_and_ocr_runs_both_stages_concurrently(monkeypatch, tmp_path):
+    import threading
+
+    # Each stage waits for the other to start; run back to back, the barrier times out.
+    both_running = threading.Barrier(2, timeout=5)
+    calls = {}
+
+    def fake_transcribe(path, model_size, language, device):
+        calls["transcribe"] = (path, model_size, language, device)
+        both_running.wait()
+        return "Chop onions"
+
+    def fake_ocr(path, seconds_between, max_frames):
+        calls["ocr"] = (path, seconds_between, max_frames)
+        both_running.wait()
+        return ["1 onion"]
+
+    monkeypatch.setattr(rex, "transcribe", fake_transcribe)
+    monkeypatch.setattr(rex, "ocr_onscreen_text", fake_ocr)
+    args = SimpleNamespace(model="base", language="en", fps_sample=0.5, max_frames=12, asr_device="cpu")
+    video = tmp_path / "v.mp4"
+
+    assert rex.transcribe_and_ocr(video, args) == ("Chop onions", ["1 onion"])
+    assert calls == {"transcribe": (video, "base", "en", "cpu"), "ocr": (video, 0.5, 12)}
 
 
 class DummyCapture:
@@ -233,12 +342,12 @@ def test_ocr_onscreen_text(monkeypatch):
         return frame
 
     class DummyOCR:
-        def __init__(self, *a, **k):
-            pass
+        def __init__(self, *a, params=None, **k):
+            ocr_calls.append(("init", params))
 
-        def predict(self, frame):
-            ocr_calls.append("predict")
-            return [{'rec_texts': ['Ingredient'], 'rec_scores': [0.9]}]
+        def __call__(self, frame):
+            ocr_calls.append("call")
+            return SimpleNamespace(txts=("Ingredient", " x "), scores=(0.9, 0.8))
 
     dummy_cv2 = mock.Mock(
         VideoCapture=DummyCapture,
@@ -249,20 +358,37 @@ def test_ocr_onscreen_text(monkeypatch):
     )
 
     monkeypatch.setitem(sys.modules, "cv2", dummy_cv2)
-    monkeypatch.setitem(sys.modules, "paddleocr", mock.Mock(PaddleOCR=DummyOCR))
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
 
     lines = rex.ocr_onscreen_text(Path("dummy.mp4"), seconds_between=0.1, max_frames=2)
     assert lines == ["Ingredient"]
-    assert ocr_calls
+    assert ocr_calls[0] == ("init", {"Global.log_level": "error", "Global.text_score": rex.OCR_MIN_SCORE})
+    # 3 frames at 30 fps sampled every 0.1s -> every 3rd frame -> one OCR call.
+    assert ocr_calls.count("call") == 1
 
 
-def test_ocr_skips_when_paddleocr_missing(monkeypatch):
+def test_ocr_handles_frames_with_no_text(monkeypatch):
+    class DummyOCR:
+        def __init__(self, *a, **k):
+            pass
+
+        def __call__(self, frame):
+            return SimpleNamespace(txts=None, scores=None)
+
+    dummy_cv2 = mock.Mock(VideoCapture=DummyCapture, CAP_PROP_FPS=5, resize=lambda f, s, interpolation: f, INTER_CUBIC=0)
+    monkeypatch.setitem(sys.modules, "cv2", dummy_cv2)
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
+
+    assert rex.ocr_onscreen_text(Path("dummy.mp4"), seconds_between=0.1, max_frames=2) == []
+
+
+def test_ocr_skips_when_rapidocr_missing(monkeypatch):
     def fail_capture(*a, **k):
-        raise AssertionError("video should not be opened when PaddleOCR is unavailable")
+        raise AssertionError("video should not be opened when RapidOCR is unavailable")
 
     monkeypatch.setitem(sys.modules, "cv2", mock.Mock(VideoCapture=fail_capture))
-    # A None entry in sys.modules makes `import paddleocr` raise ImportError.
-    monkeypatch.setitem(sys.modules, "paddleocr", None)
+    # A None entry in sys.modules makes `import rapidocr` raise ImportError.
+    monkeypatch.setitem(sys.modules, "rapidocr", None)
 
     assert rex.ocr_onscreen_text(Path("dummy.mp4")) == []
 
@@ -472,7 +598,7 @@ def test_preload_models(monkeypatch):
 
     monkeypatch.setattr(rex, "Progress", DummyProgress)
     monkeypatch.setitem(sys.modules, "faster_whisper", mock.Mock(WhisperModel=lambda *a, **k: DummyWhisper()))
-    monkeypatch.setitem(sys.modules, "paddleocr", mock.Mock(PaddleOCR=DummyOCR))
+    monkeypatch.setitem(sys.modules, "rapidocr", mock.Mock(RapidOCR=DummyOCR))
     
     class DummyArray:
         def __mul__(self, other):

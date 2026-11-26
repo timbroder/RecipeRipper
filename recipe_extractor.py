@@ -63,6 +63,9 @@ TIMEOUT = 60 * 60  # 1 hour
 # OCR processing constants
 OCR_SCALE_THRESHOLD = 720
 OCR_UPSCALE_FACTOR = 1.25
+# RapidOCR recognition confidence floor. Below ~0.6 its reads of video frames are mostly
+# garbled package text ("GDARANATE", "o a d"); real low-confidence words like "FLAT" score ~0.67.
+OCR_MIN_SCORE = 0.6
 QTY_PRECISION = 3
 OCR_SAMPLE_LIMIT = 50
 DESC_TRUNCATE_LIMIT = 5000
@@ -200,33 +203,77 @@ def download_youtube(url: str, tmpdir: Path) -> Tuple[Optional[Path], dict]:
 # -----------------------------
 # Transcription (faster-whisper)
 # -----------------------------
-def transcribe(video_path: Path, model_size: str="small", language: Optional[str]=None) -> str:
+def resolve_asr_device(requested: str = "auto") -> Tuple[str, str]:
+    """
+    Pick the faster-whisper (ctranslate2) device and compute type.
+
+    "auto" uses Apple Metal (MPS) when ctranslate2 reports an MPS device, otherwise CPU.
+    On Apple Silicon, MPS float16 transcribed ~25% faster than CPU int8 with the same text;
+    MPS float32 was ~2.5x slower, so float16 is the MPS default.
+    """
+    if requested == "cpu":
+        return "cpu", "int8"
+    if requested == "mps":
+        return "mps", "float16"
+    try:
+        import ctranslate2
+        if ctranslate2.get_mps_device_count() > 0:
+            return "mps", "float16"
+    except Exception:
+        pass
+    return "cpu", "int8"
+
+
+def has_audio_stream(video_path: Path) -> bool:
+    """False only when the file opens and has no audio track (some downloads are video-only)."""
+    try:
+        import av
+        with av.open(str(video_path)) as container:
+            return bool(container.streams.audio)
+    except Exception:
+        return True  # can't tell; let faster-whisper report the real problem
+
+
+def transcribe(video_path: Path, model_size: str="small", language: Optional[str]=None, device: str="auto") -> str:
+    if not has_audio_stream(video_path):
+        console.print("[yellow]Video has no audio track; skipping transcription.")
+        return ""
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(str(video_path), beam_size=5, language=language)
-    text_parts = []
-    for seg in segments:
-        text_parts.append(seg.text.strip())
-    transcript = " ".join([t for t in text_parts if t])
-    return transcript.strip()
+    dev, compute_type = resolve_asr_device(device)
+
+    def run(dev: str, compute_type: str) -> str:
+        vlog(f"[cyan]faster-whisper '{model_size}' on {dev} ({compute_type})")
+        model = WhisperModel(model_size, device=dev, compute_type=compute_type)
+        segments, info = model.transcribe(str(video_path), beam_size=5, language=language)
+        text_parts = [seg.text.strip() for seg in segments]
+        return " ".join([t for t in text_parts if t]).strip()
+
+    try:
+        return run(dev, compute_type)
+    except Exception as e:
+        if dev == "cpu":
+            raise
+        # ctranslate2's MPS backend is experimental; never let it sink a run.
+        console.print(f"[yellow]faster-whisper failed on {dev} ({e}); retrying on CPU.")
+        return run("cpu", "int8")
 
 # -----------------------------
-# OCR (PaddleOCR) on sampled frames
+# OCR (RapidOCR: PaddleOCR's PP-OCR models on ONNX Runtime) on sampled frames
 # -----------------------------
 def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: int=180) -> List[str]:
     import cv2
     try:
-        from paddleocr import PaddleOCR
+        from rapidocr import RapidOCR
     except ImportError:
-        console.print("[yellow]PaddleOCR is not installed; skipping on-screen text OCR. "
-                      "(PaddlePaddle has no Python 3.14 wheels yet; see docs/python-3.14.md.)")
+        console.print("[yellow]RapidOCR is not installed; skipping on-screen text OCR "
+                      "(pip install -r requirements.txt).")
         return []
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(seconds_between * fps))
-    ocr = PaddleOCR(use_textline_orientation=True, lang="en")
+    ocr = RapidOCR(params={"Global.log_level": "error", "Global.text_score": OCR_MIN_SCORE})
     idx = 0
     hits: List[str] = []
     frames_sampled = 0
@@ -242,12 +289,11 @@ def ocr_onscreen_text(video_path: Path, seconds_between: float=0.6, max_frames: 
             scale = OCR_UPSCALE_FACTOR if max(h, w) < OCR_SCALE_THRESHOLD else 1.0
             if scale != 1.0:
                 frame = cv2.resize(frame, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
-            res = ocr.predict(frame)
-            if res and len(res) > 0 and 'rec_texts' in res[0]:
-                for txt in res[0]['rec_texts']:
-                    txt = txt.strip()
-                    if txt and len(txt) >= 2:
-                        hits.append(txt)
+            res = ocr(frame)
+            for txt in (getattr(res, "txts", None) or ()):
+                txt = txt.strip()
+                if txt and len(txt) >= 2:
+                    hits.append(txt)
             frames_sampled += 1
             if frames_sampled >= max_frames:
                 break
@@ -1157,6 +1203,29 @@ def _process_directions(dir_lines: List[str], cleanup: bool) -> List[str]:
     return clean_directions(stripped) if cleanup else stripped
 
 
+def transcribe_and_ocr(video_path: Path, args) -> Tuple[str, List[str]]:
+    """
+    Run speech transcription and on-screen OCR concurrently.
+
+    The two stages are independent, and both ctranslate2 (faster-whisper) and ONNX Runtime
+    (RapidOCR) release the GIL, so threads overlap them instead of running back to back.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    vlog("[cyan]Starting transcription and OCR in parallel…")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        transcript_future = pool.submit(
+            transcribe, video_path, model_size=args.model, language=args.language,
+            device=getattr(args, "asr_device", "auto"),
+        )
+        ocr_future = pool.submit(
+            ocr_onscreen_text, video_path, seconds_between=args.fps_sample, max_frames=args.max_frames,
+        )
+        transcript = transcript_future.result()
+        ocr_lines = ocr_future.result()
+    vlog(f"[cyan]Transcription done — {len(transcript)} chars; OCR done — {len(ocr_lines)} unique lines.")
+    return transcript, ocr_lines
+
+
 def process_youtube(url: str, args) -> RecipeOutput:
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
@@ -1189,12 +1258,7 @@ def process_youtube(url: str, args) -> RecipeOutput:
             ocr_lines: List[str] = []
             console.log("[green]Recipe extracted from description — skipping video transcription/OCR.")
         else:
-            vlog("[cyan]Starting transcription…")
-            transcript = transcribe(video_path, model_size=args.model, language=args.language)
-            vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
-            vlog("[cyan]Starting OCR…")
-            ocr_lines = ocr_onscreen_text(video_path, seconds_between=args.fps_sample, max_frames=args.max_frames)
-            vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
+            transcript, ocr_lines = transcribe_and_ocr(video_path, args)
             vlog("[cyan]Combining sources…")
             ing_lines, dir_lines, nutritional_info = combine_sources(description, transcript, ocr_lines, use_local=use_local, llm_model=llm_model)
 
@@ -1222,12 +1286,7 @@ def process_local(video_file: str, args) -> RecipeOutput:
         sys.exit(2)
     title = vp.stem
     vlog(f"[cyan]Processing local video: {vp}")
-    vlog("[cyan]Starting transcription…")
-    transcript = transcribe(vp, model_size=args.model, language=args.language)
-    vlog(f"[cyan]Transcription done — {len(transcript)} chars.")
-    vlog("[cyan]Starting OCR…")
-    ocr_lines = ocr_onscreen_text(vp, seconds_between=args.fps_sample, max_frames=args.max_frames)
-    vlog(f"[cyan]OCR done — {len(ocr_lines)} unique lines.")
+    transcript, ocr_lines = transcribe_and_ocr(vp, args)
     use_local = getattr(args, "use_local", False)
     llm_model = getattr(args, "local_model", None) if use_local else getattr(args, "openai_model", None)
     vlog(f"[cyan]LLM mode: {'local (' + llm_model + ')' if use_local and llm_model else ('openai (' + llm_model + ')' if llm_model else 'off (heuristic)')}")
@@ -1352,10 +1411,10 @@ def pretty_print(out: RecipeOutput):
 
 def preload_models(model_size: str="small", lang: str="en"):
     """
-    Pre-download / cache ASR (faster-whisper) and OCR (PaddleOCR) models so
+    Pre-download / cache ASR (faster-whisper) and OCR (RapidOCR) models so
     subsequent runs work fully offline.
     """
-    console.print(f"[green]Preloading faster-whisper '{model_size}' and PaddleOCR ('{lang}') models…")
+    console.print(f"[green]Preloading faster-whisper '{model_size}' and RapidOCR models…")
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
         fw_task = progress.add_task("Downloading faster-whisper model…", start=True)
         try:
@@ -1366,18 +1425,18 @@ def preload_models(model_size: str="small", lang: str="en"):
         except Exception as e:
             progress.stop_task(fw_task)
             console.print(f"[red]faster-whisper preload failed: {e}")
-        ocr_task = progress.add_task("Downloading PaddleOCR model…", start=True)
+        ocr_task = progress.add_task("Downloading RapidOCR models…", start=True)
         try:
-            from paddleocr import PaddleOCR
+            from rapidocr import RapidOCR
             import numpy as _np
-            ocr = PaddleOCR(use_textline_orientation=True, lang=lang)
+            ocr = RapidOCR(params={"Global.log_level": "error"})
             dummy = (_np.zeros((64, 64, 3)) * 255).astype("uint8")
-            _ = ocr.predict(dummy)
-            progress.update(ocr_task, description="✓ PaddleOCR cached")
+            _ = ocr(dummy)
+            progress.update(ocr_task, description="✓ RapidOCR cached")
             progress.stop_task(ocr_task)
         except Exception as e:
             progress.stop_task(ocr_task)
-            console.print(f"[red]PaddleOCR preload failed: {e}")
+            console.print(f"[red]RapidOCR preload failed: {e}")
 
 
 def list_models():
@@ -1411,6 +1470,8 @@ def main():
     g.add_argument("--video", help="Path to a local video file")
     parser.add_argument("--language", help="Language hint (e.g., en, es, fr). Auto-detect if omitted.")
     parser.add_argument("--model", default="small", help="faster-whisper model size: tiny/base/small/medium/large-v3")
+    parser.add_argument("--asr-device", choices=["auto", "cpu", "mps"], default="auto",
+                        help="Device for faster-whisper: auto uses Apple Metal (MPS) when available, else CPU")
     parser.add_argument("--fps-sample", type=float, default=0.6, help="Seconds between OCR frames (default 0.6s)")
     parser.add_argument("--max-frames", type=int, default=180, help="Max frames to OCR (default 180)")
     parser.add_argument("--outdir", default="output", help="Where to save recipe.json/recipe.md")

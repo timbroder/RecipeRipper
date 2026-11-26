@@ -131,14 +131,14 @@ Sample frames from the video at regular intervals and run OCR to capture any tex
 2. Calculate frame step: `step = max(1, int(seconds_between * fps))`
 3. Loop through video frames, processing every `step`-th frame (up to `max_frames`):
    a. If the frame height or width is below 720 pixels, **upscale by 1.25x** using cubic interpolation (small videos produce poor OCR otherwise)
-   b. Run **PaddleOCR** (English language) on the frame
-   c. Extract recognized text lines that are at least 2 characters long
+   b. Run **RapidOCR** (PaddleOCR's PP-OCR detection/recognition models on ONNX Runtime) on the frame
+   c. Keep recognized lines with confidence ≥ `OCR_MIN_SCORE` (0.6) that are at least 2 characters long
 4. **Deduplicate** across all frames by lowercase key — the same text appearing in multiple frames is kept once
 5. Return the unique text lines
 
 ### Key for Dart reimplementation
 
-- PaddleOCR is Python-based. For Flutter, consider Google ML Kit's text recognition, Tesseract via FFI, or a cloud OCR API
+- RapidOCR is Python-based (ONNX Runtime underneath). For Flutter, consider Google ML Kit's text recognition, Tesseract via FFI, or a cloud OCR API
 - The upscaling step is important — low-resolution Shorts videos produce garbage OCR without it
 - Frame sampling rate matters: 0.6s works well for Shorts (15–60 seconds). Longer videos may need wider intervals
 - OCR output is noisy — it captures everything on screen including YouTube UI, usernames, subscribe buttons, and nutrition labels. The noise filtering happens in Stage 4
