@@ -256,6 +256,17 @@ def test_ocr_onscreen_text(monkeypatch):
     assert ocr_calls
 
 
+def test_ocr_skips_when_paddleocr_missing(monkeypatch):
+    def fail_capture(*a, **k):
+        raise AssertionError("video should not be opened when PaddleOCR is unavailable")
+
+    monkeypatch.setitem(sys.modules, "cv2", mock.Mock(VideoCapture=fail_capture))
+    # A None entry in sys.modules makes `import paddleocr` raise ImportError.
+    monkeypatch.setitem(sys.modules, "paddleocr", None)
+
+    assert rex.ocr_onscreen_text(Path("dummy.mp4")) == []
+
+
 def test_parsing_helpers(monkeypatch):
     def fake_search(pattern, text, flags=0):
         if pattern == rex.QTY_PATTERN:

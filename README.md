@@ -16,11 +16,13 @@ Extract structured **ingredients** and **directions** from a recipe video. It re
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (on-screen OCR needs 3.10–3.13; see the Python 3.14 note below)
 - `ffmpeg`
 - **OpenAI API key** (for default LLM extraction) _or_ a running **Ollama** instance (for local extraction)
 
 ## Installation
+
+> **Python 3.14:** PaddlePaddle does not publish Python 3.14 wheels yet, so `requirements.txt` skips `paddleocr`/`paddlepaddle` on 3.14 and on-screen text OCR is disabled (description and speech still work). Use Python 3.10–3.13 for the full pipeline. See [docs/python-3.14.md](docs/python-3.14.md).
 
 ```bash
 python -m venv .venv
