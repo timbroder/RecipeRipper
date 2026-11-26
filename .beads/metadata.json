@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "RecipeRipper",
+  "project_id": "56537102-5673-4dd3-a451-660c5ca758c7"
+}
